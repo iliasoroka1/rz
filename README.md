@@ -1,10 +1,13 @@
 # rz
 
-**Universal messaging for AI agents — cmux, zellij, NATS, or any terminal.**
+**Universal messaging for AI agents. If it runs in a terminal, it can talk.**
 
-One binary that works in [cmux](https://cmux.dev), [zellij](https://zellij.dev), or **any plain terminal** via PTY wrapping. Spawn agents, send messages, bridge across machines with NATS — `rz send peer "hello"` works the same way everywhere.
+Works with any AI coding agent — [Claude Code](https://claude.ai/code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), or any process that reads terminal input. No SDK, no framework — just a CLI tool that injects messages into terminals.
 
-Auto-detects your environment: cmux (`CMUX_SURFACE_ID`), zellij (`ZELLIJ`), or use `rz agent` for any terminal.
+Three ways to run:
+- **`rz run`** — inside [cmux](https://cmux.dev) or [zellij](https://zellij.dev) (spawns panes, auto-detects)
+- **`rz agent`** — in any plain terminal (PTY wrapping, no multiplexer needed)
+- **NATS** — bridge agents across machines, multiplexers, or both
 
 **Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg). Zellij support based on [meepo/rz](https://github.com/meepo/rz).
 
@@ -21,27 +24,57 @@ From source (macOS requires codesign):
 ```bash
 git clone https://github.com/iliasoroka1/rz
 cd rz
-make install    # builds, signs, copies to ~/.cargo/bin/
+make install
 ```
 
 ### Crates
 
 | Crate | Description |
 |---|---|
-| [`rz-agent`](https://crates.io/crates/rz-agent) | CLI — cmux + zellij + file + http + NATS |
-| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | `@@RZ:` wire format library (use in your own agents) |
-| `rz-hub` | Zellij WASM plugin for in-process routing (build separately) |
+| [`rz-agent`](https://crates.io/crates/rz-agent) | CLI binary — all backends and transports |
+| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | `@@RZ:` wire format library |
+| `rz-hub` | Zellij WASM plugin (build separately) |
 
 ---
 
 ## Quick start
 
+### Any terminal (no multiplexer)
+
+```bash
+# Start NATS (one-time setup)
+nats-server -js
+export RZ_HUB=nats://localhost:4222    # add to your shell profile
+
+# Terminal 1: run an agent
+rz agent --name worker -- claude --dangerously-skip-permissions
+
+# Terminal 2: run another agent
+rz agent --name lead -- claude --dangerously-skip-permissions
+
+# Terminal 3: send a message
+rz send worker "refactor the auth module"
+```
+
+`rz agent` wraps any command in a PTY and subscribes to NATS. Messages arrive as `@@RZ:` lines injected directly into the child's terminal input. Works with any agent that reads from stdin — Claude Code, Gemini CLI, OpenCode, or even plain bash.
+
+```
+┌──────────────┐       ┌──────────┐       ┌───────────────────────┐
+│ rz send      │──pub──│  NATS    │──sub──│ rz agent --name X     │
+│ worker "msg" │       │ agent.X  │       │  └─ injects @@RZ:     │
+└──────────────┘       └──────────┘       │     into child's PTY  │
+                                          │                       │
+                                          │  child = claude, gemini│
+                                          │  opencode, bash, ...  │
+                                          └───────────────────────┘
+```
+
 ### Inside a multiplexer (cmux / zellij)
 
 ```bash
-# Spawn agents (auto-detects your multiplexer)
-rz run --name lead -p "refactor auth, spawn helpers" claude --dangerously-skip-permissions
-rz run --name coder -p "implement session tokens" claude --dangerously-skip-permissions
+# Auto-detects cmux or zellij, spawns panes
+rz run --name lead -p "refactor auth" claude --dangerously-skip-permissions
+rz run --name coder -p "implement tokens" claude --dangerously-skip-permissions
 
 # Observe and interact
 rz list                    # see who's alive
@@ -49,208 +82,115 @@ rz log lead                # read lead's messages
 rz send lead "wrap up"     # intervene
 ```
 
-### Any terminal (no multiplexer needed)
+### Cross-machine (NATS)
+
+Agents on different machines, in different multiplexers, or in plain terminals — all talk through NATS:
 
 ```bash
-# Start a NATS server
-nats-server -js
-export RZ_HUB=nats://localhost:4222
-
-# Run an agent with PTY wrapping — works in any terminal
-rz agent --name worker -- claude --dangerously-skip-permissions
-```
-
-`rz agent` creates a pseudo-terminal, wraps the command, and subscribes to NATS. Incoming messages are injected directly into the child's input as `@@RZ:` lines. No cmux or zellij required.
-
-```
-┌──────────────┐       ┌──────────┐       ┌──────────────────────┐
-│ rz send      │──pub──│  NATS    │──sub──│ rz agent --name X    │
-│ worker "msg" │       │ agent.X  │       │  ├─ NATS subscriber  │
-└──────────────┘       └──────────┘       │  ├─ writes @@RZ: to  │
-                                          │  │  PTY master fd    │
-                                          │  └─ child sees it    │
-                                          │     as typed input   │
-                                          └──────────────────────┘
-```
-
-### Cross-machine / cross-multiplexer (NATS)
-
-Agents in cmux and zellij can talk to each other via NATS:
-
-```bash
-# Start a NATS server with JetStream (messages survive restarts)
-nats-server -js
-
-# Set the hub URL (add to your shell profile)
-export RZ_HUB=nats://localhost:4222
-
-# cmux terminal: spawn an agent — NATS listeners auto-start
+# Machine A (cmux)
+export RZ_HUB=nats://nats.example.com:4222
 rz run --name worker claude --dangerously-skip-permissions
 
-# zellij terminal: send to the cmux agent — routes through NATS
-rz send worker "process batch 42"
+# Machine B (plain terminal, no multiplexer)
+export RZ_HUB=nats://nats.example.com:4222
+rz agent --name reviewer -- claude --dangerously-skip-permissions
+
+# Machine C (zellij)
+export RZ_HUB=nats://nats.example.com:4222
+rz send worker "implement feature X"
+rz send reviewer "review worker's changes"
 ```
 
-When `RZ_HUB` is set, `rz run` automatically starts background NATS listeners for both the new agent and the lead. No manual `rz listen` needed.
+JetStream enabled (`nats-server -js`) gives durable delivery — messages survive agent restarts.
 
-### Universal agents (file mailbox, HTTP)
+---
 
-```bash
-# Register agents with different transports
-rz register --name worker --transport file
-rz register --name api --transport http --endpoint http://localhost:7070
+## How it works
 
-# Send — rz picks the right transport automatically
-rz send worker "process this batch"
+Every message is a single line: `@@RZ:<json>`
 
-# Receive from file mailbox
-rz recv worker             # print and consume all pending
-rz recv worker --one       # pop oldest message
+```json
+{"id":"a1b2","from":"lead","to":"worker","kind":{"kind":"chat","body":{"text":"do X"}},"ts":1774488000}
 ```
+
+The `@@RZ:` prefix lets agents distinguish protocol messages from normal terminal output. When an agent receives one, it processes the instruction and replies with `rz send`.
+
+### Message kinds
+
+| Kind | Purpose |
+|---|---|
+| `chat` | General communication (the only one you need) |
+| `ping` / `pong` | Liveness check |
+| `error` | Error report |
+| `timer` | Self-scheduled wakeup |
 
 ---
 
 ## Backends
 
-rz auto-detects the environment:
-
-| Backend | Detection | Pane IDs | Best for |
-|---|---|---|---|
-| cmux | `CMUX_SURFACE_ID` env | UUIDs (`B237E171-...`) | Claude Code desktop app |
-| zellij | `ZELLIJ` env | Numeric (`terminal_3`) | Zellij terminal users |
-| PTY agent | `rz agent --name X` | Agent name | Any terminal, remote servers, CI |
-
-Both backends support the same commands. Backend-specific features:
-
-| Feature | cmux | zellij |
+| Backend | How to use | Best for |
 |---|---|---|
-| Browser control | `rz browser open/screenshot/eval` | — |
-| Pane colors | — | `rz color <pane> --bg #003366` |
-| Pane rename | — | `rz rename <pane> "name"` |
-| WASM hub plugin | — | `rz-hub` (optional, enables timers + name routing) |
+| PTY agent | `rz agent --name X -- <cmd>` | Any terminal, SSH, CI, remote servers |
+| cmux | `rz run --name X <cmd>` (auto-detected) | Claude Code desktop app |
+| zellij | `rz run --name X <cmd>` (auto-detected) | Zellij terminal users |
 
 ## Transports
 
-| Transport | Delivery method | Best for |
+| Transport | Delivery | Best for |
 |---|---|---|
-| `cmux` | Paste into terminal via cmux socket | cmux agents |
-| `zellij` | Paste into pane via zellij CLI | zellij agents |
-| `file` | Write JSON to `~/.rz/mailboxes/<name>/inbox/` | Universal fallback |
-| `http` | POST `@@RZ:` envelope to URL | Network agents, APIs |
-| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, cross-multiplexer |
-
-### Message routing
-
-```
-rz send coder "implement auth"
-    |
-    +-- resolve "coder" -> names.json -> surface titles -> registry -> NATS
-    |
-    +-- cmux?    -> paste @@RZ: envelope into cmux surface
-    +-- zellij?  -> paste into zellij pane
-    +-- file?    -> write to ~/.rz/mailboxes/coder/inbox/
-    +-- http?    -> POST to registered URL
-    +-- nats?    -> publish to agent.coder (via RZ_HUB)
-```
-
----
-
-## Protocol
-
-Every message is a single line: `@@RZ:<json>`
-
-```json
-{
-  "id": "a1b20000",
-  "from": "lead",
-  "to": "coder",
-  "ref": "prev-msg-id",
-  "kind": { "kind": "chat", "body": { "text": "implement auth" } },
-  "ts": 1774488000000
-}
-```
-
-### Message kinds
-
-| Kind | Body | Purpose |
-|---|---|---|
-| `chat` | `{text}` | General communication |
-| `ping` / `pong` | — | Liveness check |
-| `error` | `{message}` | Error report |
-| `timer` | `{label}` | Self-scheduled wakeup |
+| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, cross-backend, PTY agents |
+| `cmux` | Paste into cmux surface | Local cmux agents |
+| `zellij` | Paste into zellij pane | Local zellij agents |
+| `file` | Write to `~/.rz/mailboxes/<name>/inbox/` | Universal fallback |
+| `http` | POST to URL | Network agents, APIs |
 
 ---
 
 ## Commands
 
-### Agent lifecycle
+### Run agents
 | Command | Description |
 |---|---|
+| `rz agent --name X -- <cmd>` | Run agent in any terminal (PTY + NATS) |
 | `rz run <cmd> --name X -p "task"` | Spawn agent in multiplexer pane |
-| `rz agent --name X -- <cmd>` | Run agent with PTY wrapping (no multiplexer needed) |
-| `rz list` / `rz ps` | List all agents — shows `(me)` next to your own |
+| `rz list` / `rz ps` | List all agents |
 | `rz close <target>` / `rz kill` | Close a pane/surface |
-| `rz ping <target>` | Check liveness, measure RTT |
 
-### Messaging
+### Send messages
 | Command | Description |
 |---|---|
-| `rz send <target> "msg"` | Send `@@RZ:` message (auto-routes) |
-| `rz send --ref <id> <target> "msg"` | Reply to specific message (threading) |
-| `rz send --wait 30 <target> "msg"` | Send and block for reply |
-| `rz ask <target> "msg"` | Shorthand for send + wait |
+| `rz send <target> "msg"` | Send message (auto-routes) |
+| `rz send --wait 30 <target> "msg"` | Send and wait for reply |
 | `rz broadcast "msg"` | Send to all agents |
 
 ### Discovery
 | Command | Description |
 |---|---|
-| `rz id` | Print this pane/surface ID |
-| `rz register --name X --transport T` | Register agent in universal registry |
-| `rz deregister X` | Remove agent from registry |
-| `rz status` | Pane counts and message stats |
-
-### File mailbox
-| Command | Description |
-|---|---|
-| `rz recv <name>` | Read and consume all pending messages |
-| `rz recv <name> --one` | Pop oldest message |
-| `rz recv <name> --count` | Count pending messages |
+| `rz id` | Print this agent's ID |
+| `rz register --name X --transport T` | Register in `~/.rz/registry.json` |
+| `rz deregister X` | Remove from registry |
+| `rz ping <target>` | Check liveness |
 
 ### NATS
 | Command | Description |
 |---|---|
-| `rz listen <name> --deliver <method>` | Subscribe to NATS subject, deliver locally |
-| `rz timer 30 "label"` | Self-deliver Timer message after N seconds |
+| `rz listen <name> --deliver <method>` | Subscribe and deliver locally |
+| `rz timer 30 "label"` | Schedule a self-wakeup |
 
-Delivery methods: `stdout`, `file`, `cmux:<surface_id>`, `zellij:<pane_id>`
+Delivery methods: `stdout`, `file`, `cmux:<id>`, `zellij:<pane_id>`
 
-### Observation
+### Observe
 | Command | Description |
 |---|---|
-| `rz log <target>` | Show `@@RZ:` protocol messages |
-| `rz dump <target>` | Full terminal scrollback |
-| `rz gather <id1> <id2>` | Collect last message from each agent |
+| `rz log <target>` | Show `@@RZ:` messages |
+| `rz dump <target>` | Full scrollback |
+| `rz gather <ids...>` | Collect last message from each |
 
 ### Workspace
 | Command | Description |
 |---|---|
-| `rz init` | Create shared workspace (`/tmp/rz-<session>/`) |
+| `rz init` | Create shared workspace |
 | `rz dir` | Print workspace path |
-
-### Browser (cmux only)
-| Command | Description |
-|---|---|
-| `rz browser open <url>` | Open browser split |
-| `rz browser screenshot <id>` | Take screenshot |
-| `rz browser eval <id> "js"` | Run JavaScript |
-| `rz browser click <id> "sel"` | Click element |
-
-### Zellij-specific
-| Command | Description |
-|---|---|
-| `rz color <pane> --bg #HEX` | Set pane border color |
-| `rz rename <pane> "name"` | Set pane title |
-| `rz watch <pane>` | Stream pane output in real-time |
 
 ---
 
@@ -259,33 +199,27 @@ Delivery methods: `stdout`, `file`, `cmux:<surface_id>`, `zellij:<pane_id>`
 ```
 rz/
 ├── crates/
-│   ├── rz-protocol/        # @@RZ: wire format (transport-agnostic)
-│   │   └── lib.rs           # Envelope, MessageKind, encode/decode
+│   ├── rz-protocol/        # @@RZ: wire format
 │   ├── rz-cli/
-│   │   ├── main.rs           # CLI commands + auto-detect backend
-│   │   ├── backend.rs        # Backend trait + CmuxBackend + ZellijBackend
+│   │   ├── main.rs           # CLI + auto-detect backend
+│   │   ├── backend.rs        # Backend trait (CmuxBackend, ZellijBackend)
+│   │   ├── pty.rs            # PTY agent (no multiplexer needed)
 │   │   ├── cmux.rs           # cmux socket client
 │   │   ├── zellij.rs         # zellij CLI wrapper
-│   │   ├── pty.rs            # PTY agent wrapper (no multiplexer)
-│   │   ├── nats_hub.rs       # NATS transport (JetStream + core)
-│   │   ├── registry.rs       # Agent discovery (~/.rz/registry.json)
+│   │   ├── nats_hub.rs       # NATS (JetStream + core)
+│   │   ├── registry.rs       # ~/.rz/registry.json
 │   │   ├── mailbox.rs        # File-based message store
-│   │   ├── transport.rs      # Pluggable delivery abstraction
 │   │   ├── bootstrap.rs      # Agent bootstrap message
-│   │   ├── log.rs            # @@RZ: message extraction
-│   │   └── status.rs         # Session status
+│   │   └── log.rs            # @@RZ: message extraction
 │   └── rz-hub/               # Zellij WASM plugin (optional)
-│       ├── main.rs            # Plugin lifecycle
-│       ├── registry.rs        # Agent registry + name index
-│       └── router.rs          # Pipe dispatch + message routing
-└── Makefile                   # build + codesign + install + publish
+└── Makefile
 ```
 
 ---
 
 ## Credits
 
-Forked from [rz](https://github.com/HodlOg/rz) ([crates.io/crates/rz-cli](https://crates.io/crates/rz-cli)) by [@HodlOg](https://github.com/HodlOg). Zellij support based on work by [@meepo](https://github.com/meepo). The `@@RZ:` protocol, bootstrap design, and core messaging architecture are from the original project.
+Forked from [rz](https://github.com/HodlOg/rz) by [@HodlOg](https://github.com/HodlOg). Zellij support based on [meepo/rz](https://github.com/meepo/rz).
 
 ## License
 
