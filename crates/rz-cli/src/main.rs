@@ -537,6 +537,53 @@ fn workspace_path() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(format!("/tmp/rz-cmux-{workspace_id}")))
 }
 
+/// Spawn a background `rz listen` process for NATS delivery.
+/// The child inherits our env (including CMUX_SOCKET_PATH) so it has cmux access.
+/// Uses a pidfile to avoid duplicate listeners for the same agent name.
+fn spawn_nats_listener(rz_path: &str, agent_name: &str, surface_id: &str) {
+    // Pidfile prevents duplicate listeners per agent name per workspace.
+    let pidfile = std::path::PathBuf::from(format!(
+        "/tmp/rz-nats-{}-{}.pid",
+        std::env::var("CMUX_WORKSPACE_ID").unwrap_or_default(),
+        agent_name,
+    ));
+
+    // Check if an existing listener is still alive.
+    if let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
+        let pid = pid_str.trim();
+        if !pid.is_empty() {
+            // `kill -0 <pid>` checks if process exists without sending a signal.
+            if std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return; // already running
+            }
+        }
+    }
+
+    let deliver = format!("cmux:{surface_id}");
+    match std::process::Command::new(rz_path)
+        .args(["listen", agent_name, "--deliver", &deliver])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            let _ = std::fs::write(&pidfile, child.id().to_string());
+            eprintln!("rz: auto-started NATS listener for '{agent_name}' (pid {})", child.id());
+        }
+        Err(e) => {
+            eprintln!("rz: failed to start NATS listener for '{agent_name}': {e}");
+        }
+    }
+}
+
 fn sender_id(from: Option<&str>) -> String {
     from.map(String::from)
         .or_else(|| cmux::own_surface_id().ok())
@@ -654,6 +701,19 @@ _Fill in the session's primary objective._
             // resolve `rz send lead ...` without needing NATS or registry.
             if let Ok(own) = cmux::own_surface_id() {
                 save_name("lead", &own);
+
+                // Auto-start NATS listeners when RZ_HUB is set.
+                // Fork background processes that inherit our cmux env vars
+                // so they have socket access to paste into surfaces.
+                if rz_cli::nats_hub::hub_url().is_some() {
+                    let rz = rz_path();
+                    // Listener for the spawned agent
+                    if let Some(ref n) = name {
+                        spawn_nats_listener(&rz, n, &surface_id);
+                    }
+                    // Listener for lead (idempotent — only starts if not already running)
+                    spawn_nats_listener(&rz, "lead", &own);
+                }
             }
 
             if !no_bootstrap {
