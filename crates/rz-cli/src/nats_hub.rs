@@ -11,8 +11,18 @@ use eyre::{bail, Result};
 use rz_agent_protocol::Envelope;
 
 /// Read the NATS hub URL from the `RZ_HUB` environment variable.
+/// Ignores values that don't look like URLs (e.g. `RZ_HUB=1`).
 pub fn hub_url() -> Option<String> {
-    std::env::var("RZ_HUB").ok().filter(|s| !s.is_empty())
+    std::env::var("RZ_HUB").ok().filter(|s| {
+        if s.is_empty() {
+            return false;
+        }
+        if !s.contains("://") {
+            eprintln!("rz: ignoring RZ_HUB={s:?} — expected a nats:// URL");
+            return false;
+        }
+        true
+    })
 }
 
 /// Return `true` if `RZ_HUB` is set and a connection to the server succeeds.
