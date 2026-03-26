@@ -469,20 +469,57 @@ fn save_name(name: &str, uuid: &str) {
 
 /// Resolve a target: if it looks like a UUID (contains '-'), use as-is.
 /// Otherwise look up in the names registry.
-fn resolve_target(target: &str) -> Result<String> {
-    if target.contains('-') {
-        return Ok(target.to_string());
+/// Resolved target with transport info.
+enum Target {
+    /// cmux terminal paste (surface_id)
+    Cmux(String),
+    /// File mailbox (agent name)
+    File(String),
+    /// HTTP POST (url)
+    Http(String),
+    /// NATS pub/sub (agent name)
+    Nats(String),
+}
+
+fn is_uuid(s: &str) -> bool {
+    // UUIDs are 36 chars: 8-4-4-4-12 hex digits with dashes
+    s.len() == 36
+        && s.chars().filter(|c| *c == '-').count() == 4
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+fn resolve_target(target: &str) -> Result<Target> {
+    // Check universal registry first — explicit transport wins
+    if let Ok(Some(entry)) = rz_cli::registry::lookup(target) {
+        return match entry.transport.as_str() {
+            "http" => Ok(Target::Http(entry.endpoint)),
+            "file" => Ok(Target::File(entry.name)),
+            "nats" => Ok(Target::Nats(entry.name)),
+            _ => Ok(Target::Cmux(entry.endpoint)),
+        };
     }
-    // Check cmux names first (fast path for terminal agents)
+    // Check cmux names (fast path for terminal agents)
     let names = load_names();
     if let Some(id) = names.get(target) {
-        return Ok(id.clone());
+        return Ok(Target::Cmux(id.clone()));
     }
-    // Fall back to universal registry
-    if let Ok(Some(entry)) = rz_cli::registry::lookup(target) {
-        return Ok(entry.endpoint);
+    // UUID-like → assume cmux surface ID
+    if is_uuid(target) {
+        return Ok(Target::Cmux(target.to_string()));
+    }
+    // Last resort: if RZ_HUB is set, try NATS
+    if rz_cli::nats_hub::hub_url().is_some() {
+        return Ok(Target::Nats(target.to_string()));
     }
     Err(eyre::eyre!("unknown agent '{}' — use a UUID, a name from `rz run --name`, or `rz register`", target))
+}
+
+/// Legacy resolver — returns surface ID string for commands that only support cmux.
+fn resolve_target_cmux(target: &str) -> Result<String> {
+    match resolve_target(target)? {
+        Target::Cmux(id) => Ok(id),
+        _ => Err(eyre::eyre!("agent '{}' is not a cmux terminal", target)),
+    }
 }
 
 fn rz_path() -> String {
@@ -628,45 +665,54 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Send { pane, message, raw, from, r#ref, wait } => {
-            match resolve_target(&pane) {
-                Ok(resolved) => {
-                    if raw {
-                        if wait.is_some() {
-                            bail!("--wait requires protocol mode (cannot use with --raw)");
-                        }
-                        cmux::send(&resolved, &message)?;
-                    } else {
-                        let mut envelope = Envelope::new(
-                            sender_id(from.as_deref()),
-                            MessageKind::Chat { text: message },
-                        ).with_to(&resolved);
-                        if let Some(r) = r#ref {
-                            envelope = envelope.with_ref(r);
-                        }
-                        let msg_id = envelope.id.clone();
-                        cmux::send(&resolved, &envelope.encode()?)?;
+            let target = resolve_target(&pane)?;
 
-                        if let Some(timeout_secs) = wait {
-                            wait_for_reply(&msg_id, timeout_secs)?;
-                        }
+            if raw {
+                if wait.is_some() {
+                    bail!("--wait requires protocol mode (cannot use with --raw)");
+                }
+                match &target {
+                    Target::Cmux(id) => cmux::send(id, &message)?,
+                    _ => bail!("--raw only works with cmux targets"),
+                }
+            } else {
+                let target_id = match &target {
+                    Target::Cmux(id) => id.as_str(),
+                    Target::Nats(name) | Target::File(name) => name.as_str(),
+                    Target::Http(url) => url.as_str(),
+                };
+                let mut envelope = Envelope::new(
+                    sender_id(from.as_deref()),
+                    MessageKind::Chat { text: message },
+                ).with_to(target_id);
+                if let Some(r) = r#ref {
+                    envelope = envelope.with_ref(r);
+                }
+                let msg_id = envelope.id.clone();
+
+                match &target {
+                    Target::Cmux(id) => {
+                        cmux::send(id, &envelope.encode()?)?;
+                    }
+                    Target::Nats(name) => {
+                        rz_cli::nats_hub::publish(name, &envelope)?;
+                    }
+                    Target::File(name) => {
+                        rz_cli::mailbox::deliver(name, &envelope)?;
+                    }
+                    Target::Http(url) => {
+                        rz_cli::transport::deliver_http(url, &envelope)?;
                     }
                 }
-                
-                Err(_) if std::env::var("RZ_HUB").is_ok() && !pane.contains('-') => {
-                    // Target not found locally but RZ_HUB is set and target
-                    // looks like a name (no dashes) — try NATS as fallback.
-                    let envelope = Envelope::new(
-                        sender_id(from.as_deref()),
-                        MessageKind::Chat { text: message },
-                    ).with_to(&pane);
-                    rz_cli::nats_hub::publish(&pane, &envelope)?;
+
+                if let Some(timeout_secs) = wait {
+                    wait_for_reply(&msg_id, timeout_secs)?;
                 }
-                Err(e) => return Err(e),
             }
         }
 
         Cmd::Ask { pane, message, timeout } => {
-            let pane = resolve_target(&pane)?;
+            let pane = resolve_target_cmux(&pane)?;
             let from = sender_id(None);
             let envelope = Envelope::new(
                 &from,
@@ -680,7 +726,7 @@ _Fill in the session's primary objective._
         Cmd::Gather { panes, last } => {
             let own = cmux::own_surface_id().ok();
             for pane_ref in &panes {
-                let pane = resolve_target(pane_ref).unwrap_or_else(|_| pane_ref.clone());
+                let pane = resolve_target_cmux(pane_ref).unwrap_or_else(|_| pane_ref.clone());
                 let scrollback = cmux::read_text(&pane).unwrap_or_default();
                 let messages = log::extract_messages(&scrollback);
                 if messages.is_empty() {
@@ -810,7 +856,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Dump { pane, last } => {
-            let pane = resolve_target(&pane)?;
+            let pane = resolve_target_cmux(&pane)?;
             let text = cmux::read_text(&pane)?;
             if let Some(n) = last {
                 let lines: Vec<&str> = text.lines().collect();
@@ -824,7 +870,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Log { pane, last } => {
-            let pane = resolve_target(&pane)?;
+            let pane = resolve_target_cmux(&pane)?;
             let own = cmux::own_surface_id().ok();
             let scrollback = cmux::read_text(&pane)?;
             let mut messages = log::extract_messages(&scrollback);
@@ -838,12 +884,12 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Close { pane } => {
-            let pane = resolve_target(&pane)?;
+            let pane = resolve_target_cmux(&pane)?;
             cmux::close(&pane)?;
         }
 
         Cmd::Ping { pane, timeout } => {
-            let pane = resolve_target(&pane)?;
+            let pane = resolve_target_cmux(&pane)?;
             let own = cmux::own_surface_id()?;
             let from = sender_id(None);
             let envelope = Envelope::new(&from, MessageKind::Ping);

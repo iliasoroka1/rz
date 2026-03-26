@@ -94,7 +94,7 @@ fn deliver_nats(endpoint: &str, envelope: &Envelope) -> Result<()> {
 
 // ── Http ────────────────────────────────────────────────────────────────
 
-fn deliver_http(base_url: &str, envelope: &Envelope) -> Result<()> {
+pub fn deliver_http(base_url: &str, envelope: &Envelope) -> Result<()> {
     let url = format!("{}/rz/inbox", base_url.trim_end_matches('/'));
     let json = serde_json::to_string(envelope)?;
 
