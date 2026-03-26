@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/rz-protocol", "crates/rz-cli"]
+resolver = "2"
