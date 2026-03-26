@@ -534,6 +534,11 @@ fn resolve_target(target: &str) -> Result<Target> {
             return registry_target(&entry);
         }
     }
+    // 1b. NATS KV registry
+    if let Ok(Some(entry)) = rz_cli::registry::nats_lookup(target) {
+        return registry_target(&entry);
+    }
+
     // 2. cmux/zellij/tmux names
     let names = load_names();
     if let Some(id) = names.get(target) {
@@ -1042,12 +1047,24 @@ _Fill in the session's primary objective._
             }
 
             // Also show agents from the universal registry (PTY agents, etc.)
+            let mut shown_names = std::collections::HashSet::new();
             if let Ok(agents) = rz_cli::registry::list_all() {
                 let own_name = std::env::var("RZ_AGENT_NAME").ok();
                 for a in &agents {
                     let marker = if own_name.as_deref() == Some(a.name.as_str()) { " (me)" } else { "" };
                     println!("{:<18} {:<38} {:<20} {:<8}{}",
                         a.name, a.id, a.transport, "agent", marker);
+                    shown_names.insert(a.name.clone());
+                }
+            }
+
+            // Also show agents from NATS KV (global view)
+            if let Ok(nats_agents) = rz_cli::registry::nats_list() {
+                for a in &nats_agents {
+                    if !shown_names.contains(&a.name) {
+                        println!("{:<18} {:<38} {:<20} {:<8} (nats)",
+                            a.name, a.id, a.transport, "agent");
+                    }
                 }
             }
         }
@@ -1200,12 +1217,14 @@ _Fill in the session's primary objective._
                 registered_at: now,
                 last_seen: now,
             };
-            rz_cli::registry::register(entry)?;
+            rz_cli::registry::register(entry.clone())?;
+            let _ = rz_cli::registry::nats_register(&entry);
             println!("registered: {}", name);
         }
 
         Cmd::Deregister { name } => {
             rz_cli::registry::deregister(&name)?;
+            let _ = rz_cli::registry::nats_deregister(&name);
             println!("deregistered: {}", name);
         }
 

@@ -65,7 +65,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
         .unwrap_or_default()
         .as_millis() as u64;
 
-    crate::registry::register(crate::registry::AgentEntry {
+    let entry = crate::registry::AgentEntry {
         name: name.to_string(),
         id: format!("pty-{}", std::process::id()),
         transport: "nats".to_string(),
@@ -73,8 +73,10 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
         capabilities: vec![],
         registered_at: now_ms,
         last_seen: now_ms,
-    })
-    .wrap_err("failed to register agent")?;
+    };
+    crate::registry::register(entry.clone())
+        .wrap_err("failed to register agent")?;
+    let _ = crate::registry::nats_register(&entry);
 
     // Phase 3: Fork child
     let child_pid: Pid;
@@ -259,6 +261,16 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
         eprintln!("rz: pty: RZ_HUB not set — NATS messaging disabled");
     }
 
+    // Heartbeat thread — periodically update NATS KV
+    let hb_name = name.to_string();
+    let hb_entry = entry.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(120));
+            let _ = crate::registry::nats_heartbeat(&hb_name, &hb_entry);
+        }
+    });
+
     // Phase 6: Propagate window size + install SIGWINCH handler
     propagate_winsize(stdin_fd, master_raw);
     MASTER_RAW_FD.store(master_raw, Ordering::SeqCst);
@@ -358,6 +370,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
     // Phase 8: Cleanup
     drop(_raw_guard);
     let _ = crate::registry::deregister(name);
+    let _ = crate::registry::nats_deregister(name);
 
     use nix::sys::wait::waitpid;
     let _ = waitpid(child_pid, None);

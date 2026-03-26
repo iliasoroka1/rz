@@ -125,3 +125,183 @@ pub fn touch(name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// NATS KV-backed registry
+// ---------------------------------------------------------------------------
+
+const NATS_KV_BUCKET: &str = "rz-agents";
+
+/// Get or create the NATS KV store for agent registration.
+async fn nats_kv_store(
+    js: &async_nats::jetstream::Context,
+) -> Result<async_nats::jetstream::kv::Store> {
+    match js.get_key_value(NATS_KV_BUCKET).await {
+        Ok(store) => Ok(store),
+        Err(_) => {
+            let store = js
+                .create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: NATS_KV_BUCKET.to_string(),
+                    max_age: std::time::Duration::from_secs(300), // 5 min TTL
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| eyre::eyre!("NATS KV create bucket failed: {e}"))?;
+            Ok(store)
+        }
+    }
+}
+
+/// Register an agent in the NATS KV bucket `rz-agents`.
+/// If `RZ_HUB` is not set, returns `Ok(())` silently.
+pub fn nats_register(entry: &AgentEntry) -> Result<()> {
+    let url = match crate::nats_hub::hub_url() {
+        Some(u) => u,
+        None => return Ok(()),
+    };
+    let json = serde_json::to_string(entry)?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+        let js = async_nats::jetstream::new(client);
+        let store = nats_kv_store(&js).await?;
+        store
+            .put(&entry.name, json.into_bytes().into())
+            .await
+            .map_err(|e| eyre::eyre!("NATS KV put failed: {e}"))?;
+        Ok::<(), eyre::Report>(())
+    })?;
+    Ok(())
+}
+
+/// Remove an agent from the NATS KV bucket `rz-agents`.
+/// If `RZ_HUB` is not set, returns `Ok(())` silently.
+pub fn nats_deregister(name: &str) -> Result<()> {
+    let url = match crate::nats_hub::hub_url() {
+        Some(u) => u,
+        None => return Ok(()),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+        let js = async_nats::jetstream::new(client);
+        let store = nats_kv_store(&js).await?;
+        // Delete returns an error if key doesn't exist; ignore it.
+        let _ = store.delete(name).await;
+        Ok::<(), eyre::Report>(())
+    })?;
+    Ok(())
+}
+
+/// List all agents from the NATS KV bucket `rz-agents`.
+/// If `RZ_HUB` is not set or bucket doesn't exist, returns an empty vec.
+pub fn nats_list() -> Result<Vec<AgentEntry>> {
+    let url = match crate::nats_hub::hub_url() {
+        Some(u) => u,
+        None => return Ok(Vec::new()),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+        let js = async_nats::jetstream::new(client);
+        let store = match js.get_key_value(NATS_KV_BUCKET).await {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()), // bucket doesn't exist
+        };
+
+        use futures::StreamExt;
+        let mut keys = match store.keys().await {
+            Ok(k) => k,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut entries = Vec::new();
+        while let Some(key) = keys.next().await {
+            let key = match key {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if let Ok(Some(kv_entry)) = store.get(&key).await {
+                if let Ok(agent) =
+                    serde_json::from_slice::<AgentEntry>(&kv_entry)
+                {
+                    entries.push(agent);
+                }
+            }
+        }
+        Ok(entries)
+    })
+}
+
+/// Look up a single agent by name from the NATS KV bucket.
+/// If `RZ_HUB` is not set or key not found, returns `None`.
+pub fn nats_lookup(name: &str) -> Result<Option<AgentEntry>> {
+    let url = match crate::nats_hub::hub_url() {
+        Some(u) => u,
+        None => return Ok(None),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+        let js = async_nats::jetstream::new(client);
+        let store = match js.get_key_value(NATS_KV_BUCKET).await {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        match store.get(name).await {
+            Ok(Some(value)) => {
+                let agent = serde_json::from_slice::<AgentEntry>(&value)
+                    .map_err(|e| eyre::eyre!("NATS KV deserialize failed: {e}"))?;
+                Ok(Some(agent))
+            }
+            Ok(None) | Err(_) => Ok(None),
+        }
+    })
+}
+
+/// Re-put an agent entry to refresh its TTL in the NATS KV bucket.
+/// If `RZ_HUB` is not set, returns `Ok(())` silently.
+pub fn nats_heartbeat(name: &str, entry: &AgentEntry) -> Result<()> {
+    let url = match crate::nats_hub::hub_url() {
+        Some(u) => u,
+        None => return Ok(()),
+    };
+    let json = serde_json::to_string(entry)?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+        let js = async_nats::jetstream::new(client);
+        let store = nats_kv_store(&js).await?;
+        store
+            .put(name, json.into_bytes().into())
+            .await
+            .map_err(|e| eyre::eyre!("NATS KV heartbeat put failed: {e}"))?;
+        Ok::<(), eyre::Report>(())
+    })?;
+    Ok(())
+}
