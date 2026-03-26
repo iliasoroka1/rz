@@ -1,6 +1,6 @@
 [package]
 name = "rz-agent-protocol"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "@@RZ: wire protocol for inter-agent messaging (transport-agnostic)"
 license = "MIT OR Apache-2.0"
