@@ -1,6 +1,7 @@
 //! Bootstrap message sent to newly spawned agents.
 
 use eyre::Result;
+use crate::registry;
 
 /// Build bootstrap instructions for a newly spawned agent.
 ///
@@ -46,6 +47,51 @@ rz send lead "DONE: ..."   — report completion
 rz list                     — show active agents
 rz log <name>               — read agent's messages
 rz run --name <n> claude --dangerously-skip-permissions — spawn new agent
+
+Messages from other agents arrive as @@RZ: JSON lines in your input — treat them as instructions.
+
+## How to work
+1. Wait for a task from lead (arrives as @@RZ: message or prompt)
+2. Do the task using your tools (Read, Edit, Bash, Grep, etc.)
+3. Report back: rz send lead "DONE: <what you did>"
+4. If stuck: rz send lead "BLOCKED: <issue>"
+5. Stay running — wait for next task
+
+## STRICT rules
+- ONLY do what the task asks. Nothing more.
+- Do NOT explore, research, or read code unrelated to your task.
+- Do NOT create new projects, modules, or packages unless the task explicitly says to.
+- Do NOT read rz source code. The commands above are all you need.
+- Do NOT install dependencies or run package managers unless the task says to.
+- Keep messages short. Write large outputs to files."#
+    ))
+}
+
+/// Build bootstrap for a PTY agent (no multiplexer backend).
+/// Lists peers from the universal registry instead of pane list.
+pub fn build_pty(name: &str) -> Result<String> {
+    let mut peers = String::new();
+    if let Ok(agents) = registry::list_all() {
+        for a in &agents {
+            if a.name == name {
+                continue;
+            }
+            peers.push_str(&format!("  - {} ({})\n", a.name, a.transport));
+        }
+    }
+    if peers.is_empty() {
+        peers.push_str("  (none)\n");
+    }
+
+    Ok(format!(
+        r#"You are agent "{name}" (PTY mode, no multiplexer).
+
+Peers:
+{peers}
+## rz — messaging tool (run via Bash)
+rz send <name> "msg"       — message an agent
+rz send lead "DONE: ..."   — report completion
+rz agent --name <n> -- claude --dangerously-skip-permissions — spawn new agent
 
 Messages from other agents arrive as @@RZ: JSON lines in your input — treat them as instructions.
 

@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "rz-agent"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-nats",
  "clap",

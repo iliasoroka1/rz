@@ -53,7 +53,7 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
 }
 
 /// Run a command as a named rz agent with PTY wrapping.
-pub fn run_agent(name: &str, command: &[String], _no_bootstrap: bool) -> Result<()> {
+pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<()> {
     // Phase 1: Create PTY
     let pty = openpty(None, None).wrap_err("failed to open PTY")?;
     let master_raw: RawFd = pty.master.as_raw_fd();
@@ -138,9 +138,24 @@ pub fn run_agent(name: &str, command: &[String], _no_bootstrap: bool) -> Result<
         original: original_termios,
     };
 
-    // Phase 5: NATS subscriber thread
+    // Phase 5: Bootstrap — send identity and instructions after child loads.
+    let bootstrap_name = name.to_string();
+    let bootstrap_master = master_raw;
+    let send_bootstrap = !no_bootstrap;
+    std::thread::spawn(move || {
+        // Wait for child to fully load before sending bootstrap.
+        std::thread::sleep(Duration::from_secs(10));
+        if send_bootstrap {
+            if let Ok(msg) = crate::bootstrap::build_pty(&bootstrap_name) {
+                let _ = write_all_fd(bootstrap_master, msg.as_bytes());
+                std::thread::sleep(Duration::from_millis(100));
+                let _ = write_all_fd(bootstrap_master, b"\r");
+            }
+        }
+    });
+
+    // Phase 6: NATS subscriber thread
     // Wait for the child process to fully start before accepting messages.
-    // Claude Code takes several seconds to load its TUI.
     let (msg_tx, msg_rx) = mpsc::channel::<Envelope>();
 
     let nats_name = name.to_string();

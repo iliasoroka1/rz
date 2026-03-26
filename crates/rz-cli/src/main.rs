@@ -946,22 +946,34 @@ _Fill in the session's primary objective._
         }
 
         Cmd::List => {
-            let surfaces = cmux::list_surfaces()?;
-            let own = cmux::own_surface_id().ok();
-            let names = load_names();
-            // Build reverse map: uuid → name
-            let uuid_to_name: std::collections::HashMap<&str, &str> = names
-                .iter()
-                .map(|(n, u)| (u.as_str(), n.as_str()))
-                .collect();
             println!("{:<18} {:<38} {:<20} {:<8}",
-                "NAME", "SURFACE_ID", "TITLE", "TYPE");
-            for s in &surfaces {
-                let marker = if own.as_deref() == Some(s.id.as_str()) { " (me)" } else { "" };
-                let title = if s.title.is_empty() { "-" } else { &s.title };
-                let name = uuid_to_name.get(s.id.as_str()).unwrap_or(&"-");
-                println!("{:<18} {:<38} {:<20} {:<8}{}",
-                    name, s.id, title, s.surface_type, marker);
+                "NAME", "ID", "TITLE", "TYPE");
+
+            // Show multiplexer panes if inside one.
+            let own = cmux::own_surface_id().ok();
+            if let Ok(surfaces) = cmux::list_surfaces() {
+                let names = load_names();
+                let uuid_to_name: std::collections::HashMap<&str, &str> = names
+                    .iter()
+                    .map(|(n, u)| (u.as_str(), n.as_str()))
+                    .collect();
+                for s in &surfaces {
+                    let marker = if own.as_deref() == Some(s.id.as_str()) { " (me)" } else { "" };
+                    let title = if s.title.is_empty() { "-" } else { &s.title };
+                    let name = uuid_to_name.get(s.id.as_str()).unwrap_or(&"-");
+                    println!("{:<18} {:<38} {:<20} {:<8}{}",
+                        name, s.id, title, s.surface_type, marker);
+                }
+            }
+
+            // Also show agents from the universal registry (PTY agents, etc.)
+            if let Ok(agents) = rz_cli::registry::list_all() {
+                let own_name = std::env::var("RZ_AGENT_NAME").ok();
+                for a in &agents {
+                    let marker = if own_name.as_deref() == Some(a.name.as_str()) { " (me)" } else { "" };
+                    println!("{:<18} {:<38} {:<20} {:<8}{}",
+                        a.name, a.id, a.transport, "agent", marker);
+                }
             }
         }
 
