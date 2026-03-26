@@ -238,6 +238,14 @@ async fn jetstream_consume(
         if let Err(e) = msg.ack().await {
             eprintln!("rz: jetstream ack failed: {e}");
         }
+
+        // Pace cmux deliveries — the TUI needs time to process each message
+        // before the next one arrives. Without this, rapid back-to-back
+        // deliveries cause the second message to land in the input box
+        // without Enter being pressed.
+        if delivery.starts_with("cmux:") {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
     }
 
     bail!("JetStream subscription ended unexpectedly");
@@ -272,6 +280,10 @@ async fn core_subscribe(
 
         if let Err(e) = deliver_locally(delivery, &envelope) {
             eprintln!("rz: nats: delivery error: {e}");
+        }
+
+        if delivery.starts_with("cmux:") {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
     }
 

@@ -447,7 +447,10 @@ enum Cmd {
 
 /// Path to the name→UUID registry file.
 fn names_path() -> Option<std::path::PathBuf> {
-    workspace_path().ok().map(|ws| ws.join("names.json"))
+    let ws = workspace_path().ok()?;
+    // Ensure the workspace directory exists so names.json can always be written.
+    let _ = std::fs::create_dir_all(&ws);
+    Some(ws.join("names.json"))
 }
 
 /// Load the name→UUID map from disk.
@@ -645,6 +648,12 @@ _Fill in the session's primary objective._
             // Register name→UUID mapping if --name was given.
             if let Some(ref n) = name {
                 save_name(n, &surface_id);
+            }
+
+            // Always register "lead" → own surface so spawned agents can
+            // resolve `rz send lead ...` without needing NATS or registry.
+            if let Ok(own) = cmux::own_surface_id() {
+                save_name("lead", &own);
             }
 
             if !no_bootstrap {

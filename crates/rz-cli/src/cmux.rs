@@ -134,7 +134,9 @@ pub fn send(surface_id: &str, text: &str) -> Result<()> {
         "text": text,
     }))?;
     // Let the TUI process the pasted text before pressing Enter.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Long messages (@@RZ: envelopes) need more time for the TUI to render.
+    let delay = if text.len() > 200 { 600 } else { 200 };
+    std::thread::sleep(std::time::Duration::from_millis(delay));
     // surface.send_text pastes but doesn't submit — follow with Enter
     v2_call("surface.send_key", json!({
         "surface_id": surface_id,
