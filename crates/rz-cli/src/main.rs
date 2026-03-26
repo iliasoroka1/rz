@@ -561,6 +561,11 @@ fn rz_path() -> String {
         .unwrap_or_else(|_| "rz".into())
 }
 
+fn dirs_path(subdir: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".rz").join(subdir)
+}
+
 fn workspace_path() -> Result<std::path::PathBuf> {
     let workspace_id = std::env::var("CMUX_WORKSPACE_ID")
         .map_err(|_| eyre::eyre!("CMUX_WORKSPACE_ID not set — not inside cmux?"))?;
@@ -739,45 +744,95 @@ _Fill in the session's primary objective._
             prompt,
             args,
         } => {
-            let be = backend::detect()
-                .ok_or_else(|| eyre::eyre!("not inside cmux or zellij — cannot spawn"))?;
+            if let Some(be) = backend::detect() {
+                // Inside a multiplexer — spawn a pane.
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let surface_id = be.spawn(&command, &arg_refs, name.as_deref())?;
 
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let surface_id = be.spawn(&command, &arg_refs, name.as_deref())?;
+                if let Some(ref n) = name {
+                    save_name(n, &surface_id);
+                }
 
-            // Register name→ID mapping if --name was given.
-            if let Some(ref n) = name {
-                save_name(n, &surface_id);
-            }
+                if let Ok(own) = be.own_id() {
+                    save_name("lead", &own);
 
-            // Register "lead" → own ID so spawned agents can resolve it.
-            if let Ok(own) = be.own_id() {
-                save_name("lead", &own);
-
-                // Auto-start NATS listeners when RZ_HUB is set.
-                let prefix = be.backend_name(); // "cmux" or "zellij"
-                if rz_cli::nats_hub::hub_url().is_some() {
-                    let rz = rz_path();
-                    if let Some(ref n) = name {
-                        spawn_nats_listener(&rz, n, &format!("{prefix}:{surface_id}"));
+                    let prefix = be.backend_name();
+                    if rz_cli::nats_hub::hub_url().is_some() {
+                        let rz = rz_path();
+                        if let Some(ref n) = name {
+                            spawn_nats_listener(&rz, n, &format!("{prefix}:{surface_id}"));
+                        }
+                        spawn_nats_listener(&rz, "lead", &format!("{prefix}:{own}"));
                     }
-                    spawn_nats_listener(&rz, "lead", &format!("{prefix}:{own}"));
+                }
+
+                if !no_bootstrap {
+                    be.wait_for_ready(&surface_id, wait, 5);
+
+                    let msg = bootstrap::build(&surface_id, name.as_deref(), be.as_ref())?;
+                    be.send(&surface_id, &msg)?;
+
+                    if let Some(task) = prompt {
+                        be.wait_for_ready(&surface_id, 30, 3);
+                        be.send(&surface_id, &task)?;
+                    }
+                }
+
+                println!("{surface_id}");
+            } else {
+                // No multiplexer — fall back to headless PTY agent.
+                let agent_name = name.as_deref()
+                    .ok_or_else(|| eyre::eyre!("--name is required when spawning without a multiplexer"))?;
+
+                let rz = rz_path();
+                let mut cmd_args = vec!["agent".to_string(), "--name".to_string(), agent_name.to_string()];
+                if no_bootstrap {
+                    cmd_args.push("--no-bootstrap".to_string());
+                }
+                cmd_args.push("--".to_string());
+                cmd_args.push(command.clone());
+                for a in &args {
+                    cmd_args.push(a.clone());
+                }
+
+                // Ensure log directory exists.
+                let log_dir = dirs_path("logs");
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_file = std::fs::File::create(log_dir.join(format!("{agent_name}.log")))
+                    .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+
+                let cmd_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+                match std::process::Command::new(&rz)
+                    .args(&cmd_refs)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap()))
+                    .stderr(log_file)
+                    .spawn()
+                {
+                    Ok(child) => {
+                        eprintln!("rz: spawned headless PTY agent '{}' (pid {})", agent_name, child.id());
+
+                        // Send task via NATS after startup delay if prompt given.
+                        if let Some(task) = prompt {
+                            let target = agent_name.to_string();
+                            std::thread::spawn(move || {
+                                // Wait for agent to register and start listening.
+                                std::thread::sleep(std::time::Duration::from_secs(15));
+                                let envelope = Envelope::new(
+                                    sender_id(None),
+                                    MessageKind::Chat { text: task },
+                                ).with_to(&target);
+                                if rz_cli::nats_hub::hub_url().is_some() {
+                                    let _ = rz_cli::nats_hub::publish(&target, &envelope);
+                                }
+                            });
+                        }
+
+                        println!("pty-{}", child.id());
+                    }
+                    Err(e) => bail!("failed to spawn headless agent: {e}"),
                 }
             }
-
-            if !no_bootstrap {
-                be.wait_for_ready(&surface_id, wait, 5);
-
-                let msg = bootstrap::build(&surface_id, name.as_deref(), be.as_ref())?;
-                be.send(&surface_id, &msg)?;
-
-                if let Some(task) = prompt {
-                    be.wait_for_ready(&surface_id, 30, 3);
-                    be.send(&surface_id, &task)?;
-                }
-            }
-
-            println!("{surface_id}");
         }
 
         Cmd::Send { pane, message, raw, from, r#ref, wait } => {
