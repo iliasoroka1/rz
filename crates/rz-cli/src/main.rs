@@ -443,6 +443,27 @@ enum Cmd {
         #[arg(long)]
         count: bool,
     },
+
+    /// Run a command as a named rz agent with PTY wrapping.
+    ///
+    /// No terminal multiplexer needed. Creates a pseudo-terminal,
+    /// subscribes to NATS for incoming messages, and injects them
+    /// as @@RZ: lines into the child process.
+    ///
+    /// Examples:
+    ///   rz agent --name worker -- claude --dangerously-skip-permissions
+    ///   rz agent --name lead -- claude --dangerously-skip-permissions
+    Agent {
+        /// Agent name (used for NATS subject, registry, routing).
+        #[arg(long)]
+        name: String,
+        /// Skip bootstrap instructions.
+        #[arg(long)]
+        no_bootstrap: bool,
+        /// Command and arguments to run (after --).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 /// Path to the name→UUID registry file.
@@ -598,6 +619,7 @@ fn spawn_nats_listener(rz_path: &str, agent_name: &str, deliver: &str) {
 
 fn sender_id(from: Option<&str>) -> String {
     from.map(String::from)
+        .or_else(|| std::env::var("RZ_AGENT_NAME").ok())
         .or_else(|| cmux::own_surface_id().ok())
         .unwrap_or_else(|| "unknown".into())
 }
@@ -1107,6 +1129,10 @@ _Fill in the session's primary objective._
                     println!("{}", env.encode()?);
                 }
             }
+        }
+
+        Cmd::Agent { name, no_bootstrap, command } => {
+            rz_cli::pty::run_agent(&name, &command, no_bootstrap)?;
         }
     }
 

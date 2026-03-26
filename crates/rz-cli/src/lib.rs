@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod bootstrap;
+pub mod pty;
 pub mod cmux;
 pub mod log;
 pub mod mailbox;
