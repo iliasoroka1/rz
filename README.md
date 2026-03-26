@@ -121,6 +121,32 @@ rz-cmux/
 | `cmux` | Paste into terminal via cmux socket | Terminal agents (Claude Code) |
 | `file` | Write JSON to `~/.rz/mailboxes/<name>/inbox/` | Universal — works everywhere |
 | `http` | POST @@RZ: envelope to URL | Network agents (tinyclaw, APIs) |
+| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine agent coordination |
+
+### NATS hub (cross-machine)
+
+For agents on different machines, rz uses [NATS](https://nats.io) as a message bus. Set `RZ_HUB` and agents can talk across the network:
+
+```bash
+# Start a NATS server (or use a hosted one)
+nats-server
+
+# On machine A
+export RZ_HUB=nats://nats.example.com:4222
+rz register --name worker --transport nats
+
+# On machine B
+export RZ_HUB=nats://nats.example.com:4222
+rz send worker "process batch 42"
+```
+
+How it works:
+1. Sender can't find `worker` locally (not in cmux names, not in registry)
+2. `RZ_HUB` is set, so rz publishes the `@@RZ:` envelope to NATS subject `agent.worker`
+3. On machine A, `rz listen worker --deliver file` subscribes to `agent.worker` and delivers incoming messages to the file mailbox
+4. Worker picks them up with `rz recv worker`
+
+NATS is the only transport that crosses machine boundaries. The others (cmux, file, http) are local.
 
 ### Message flow
 
@@ -131,7 +157,8 @@ rz send coder "implement auth"
     │
     ├── transport = cmux?  → paste @@RZ: envelope into terminal
     ├── transport = file?  → write envelope to ~/.rz/mailboxes/coder/inbox/
-    └── transport = http?  → POST envelope to registered URL
+    ├── transport = http?  → POST envelope to registered URL
+    └── transport = nats?  → publish to NATS subject agent.coder (via RZ_HUB)
 ```
 
 ---
@@ -173,7 +200,7 @@ Every message is a single line: `@@RZ:<json>`
 | Command | Description |
 |---|---|
 | `rz id` | Print this surface's ID |
-| `rz list` / `rz ps` | List all surfaces and registered agents |
+| `rz list` / `rz ps` | List all surfaces and registered agents — shows `(me)` next to your own |
 | `rz status` | Surface counts and message counts |
 | `rz register --name X --transport T` | Register agent in universal registry |
 | `rz deregister X` | Remove agent from registry |
@@ -208,9 +235,10 @@ Every message is a single line: `@@RZ:<json>`
 ### Observation
 | Command | Description |
 |---|---|
-| `rz log <target>` | Show @@RZ: protocol messages |
+| `rz log <target>` | Show @@RZ: protocol messages — marks `(me)` on your own |
 | `rz dump <target>` | Full terminal scrollback |
 | `rz gather <id1> <id2>` | Collect last message from each agent |
+| `rz listen <name> --deliver file` | Subscribe to NATS subject and deliver to mailbox |
 
 ### Browser (cmux only)
 | Command | Description |
