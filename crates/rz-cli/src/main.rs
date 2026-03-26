@@ -513,26 +513,37 @@ fn is_uuid(s: &str) -> bool {
 }
 
 fn resolve_target(target: &str) -> Result<Target> {
-    // Check universal registry first — explicit transport wins
+    // 1. Universal registry — check and prune dead PTY agents
     if let Ok(Some(entry)) = rz_cli::registry::lookup(target) {
-        return match entry.transport.as_str() {
-            "http" => Ok(Target::Http(entry.endpoint)),
-            "file" => Ok(Target::File(entry.name)),
-            "nats" => Ok(Target::Nats(entry.name)),
-            _ => Ok(Target::Cmux(entry.endpoint)),
-        };
+        // Verify PTY agents are still alive (id = "pty-<pid>").
+        if let Some(pid_str) = entry.id.strip_prefix("pty-") {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                let _ = rz_cli::registry::deregister(target);
+                // Fall through to other resolution methods.
+            } else {
+                return registry_target(&entry);
+            }
+        } else {
+            return registry_target(&entry);
+        }
     }
-    // Check cmux names (fast path for terminal agents)
+    // 2. cmux/zellij/tmux names
     let names = load_names();
     if let Some(id) = names.get(target) {
         return Ok(Target::Cmux(id.clone()));
     }
-    // UUID-like → assume cmux surface ID
+    // 3. UUID-like → assume cmux surface ID
     if is_uuid(target) {
         return Ok(Target::Cmux(target.to_string()));
     }
-    // Fallback: search cmux surface titles for a match.
-    // Surfaces spawned with --name have the name set as their title.
+    // 4. Search multiplexer surface titles
     if let Ok(surfaces) = cmux::list_surfaces() {
         for s in &surfaces {
             if s.title.eq_ignore_ascii_case(target) || s.title.contains(target) {
@@ -540,11 +551,20 @@ fn resolve_target(target: &str) -> Result<Target> {
             }
         }
     }
-    // Last resort: if RZ_HUB is set, try NATS
+    // 5. NATS fallback
     if rz_cli::nats_hub::hub_url().is_some() {
         return Ok(Target::Nats(target.to_string()));
     }
     Err(eyre::eyre!("unknown agent '{}' — use a UUID, a name from `rz run --name`, or `rz register`", target))
+}
+
+fn registry_target(entry: &rz_cli::registry::AgentEntry) -> Result<Target> {
+    match entry.transport.as_str() {
+        "http" => Ok(Target::Http(entry.endpoint.clone())),
+        "file" => Ok(Target::File(entry.name.clone())),
+        "nats" => Ok(Target::Nats(entry.name.clone())),
+        _ => Ok(Target::Cmux(entry.endpoint.clone())),
+    }
 }
 
 /// Legacy resolver — returns surface ID string for commands that only support cmux.
