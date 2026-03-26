@@ -39,39 +39,43 @@ pub fn extract_messages(scrollback: &str) -> Vec<Envelope> {
 }
 
 /// Format an envelope as a human-readable one-liner: `[HH:MM:SS] from_id> text`
-pub fn format_message(envelope: &Envelope) -> String {
+///
+/// If `own_id` is provided and matches `envelope.from`, appends `(me)` to the sender.
+pub fn format_message(envelope: &Envelope, own_id: Option<&str>) -> String {
     let secs = envelope.ts / 1000;
     let h = (secs / 3600) % 24;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
 
+    let me = if own_id == Some(envelope.from.as_str()) { " (me)" } else { "" };
+
     let text = match &envelope.kind {
         MessageKind::Chat { text } => text.as_str(),
         MessageKind::Hello { name, pane_id } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> hello ({name}, {pane_id})", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> hello ({name}, {pane_id})", envelope.from);
         }
         MessageKind::Ping => "ping",
         MessageKind::Pong => "pong",
         MessageKind::Error { message } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> error: {message}", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> error: {message}", envelope.from);
         }
         MessageKind::Timer { label } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> timer: {label}", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> timer: {label}", envelope.from);
         }
         MessageKind::ToolCall { name, call_id, .. } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> tool_call: {name} ({call_id})", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> tool_call: {name} ({call_id})", envelope.from);
         }
         MessageKind::ToolResult { call_id, result, is_error } => {
             let tag = if *is_error { "tool_error" } else { "tool_result" };
-            return format!("[{h:02}:{m:02}:{s:02}] {}> {tag}: {result} ({call_id})", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> {tag}: {result} ({call_id})", envelope.from);
         }
         MessageKind::Delegate { task, .. } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> delegate: {task}", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> delegate: {task}", envelope.from);
         }
         MessageKind::Status { state, detail } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}> status: {state} — {detail}", envelope.from);
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> status: {state} — {detail}", envelope.from);
         }
     };
 
-    format!("[{h:02}:{m:02}:{s:02}] {}> {text}", envelope.from)
+    format!("[{h:02}:{m:02}:{s:02}] {}{me}> {text}", envelope.from)
 }

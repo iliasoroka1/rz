@@ -518,7 +518,7 @@ fn wait_for_reply(msg_id: &str, timeout_secs: u64) -> Result<()> {
         if let Some(reply) = messages.iter().rev().find(|m| {
             m.r#ref.as_deref() == Some(msg_id)
         }) {
-            println!("{}", log::format_message(reply));
+            println!("{}", log::format_message(reply, None));
             return Ok(());
         }
     }
@@ -678,6 +678,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Gather { panes, last } => {
+            let own = cmux::own_surface_id().ok();
             for pane_ref in &panes {
                 let pane = resolve_target(pane_ref).unwrap_or_else(|_| pane_ref.clone());
                 let scrollback = cmux::read_text(&pane).unwrap_or_default();
@@ -687,7 +688,7 @@ _Fill in the session's primary objective._
                 } else {
                     let start = messages.len().saturating_sub(last);
                     for msg in &messages[start..] {
-                        println!("{pane_ref}  {}", log::format_message(msg));
+                        println!("{pane_ref}  {}", log::format_message(msg, own.as_deref()));
                     }
                 }
             }
@@ -794,7 +795,7 @@ _Fill in the session's primary objective._
             println!("{:<18} {:<38} {:<20} {:<8}",
                 "NAME", "SURFACE_ID", "TITLE", "TYPE");
             for s in &surfaces {
-                let marker = if own.as_deref() == Some(s.id.as_str()) { " *" } else { "" };
+                let marker = if own.as_deref() == Some(s.id.as_str()) { " (me)" } else { "" };
                 let title = if s.title.is_empty() { "-" } else { &s.title };
                 let name = uuid_to_name.get(s.id.as_str()).unwrap_or(&"-");
                 println!("{:<18} {:<38} {:<20} {:<8}{}",
@@ -824,6 +825,7 @@ _Fill in the session's primary objective._
 
         Cmd::Log { pane, last } => {
             let pane = resolve_target(&pane)?;
+            let own = cmux::own_surface_id().ok();
             let scrollback = cmux::read_text(&pane)?;
             let mut messages = log::extract_messages(&scrollback);
             if let Some(n) = last {
@@ -831,7 +833,7 @@ _Fill in the session's primary objective._
                 messages = messages.into_iter().skip(skip).collect();
             }
             for msg in &messages {
-                println!("{}", log::format_message(msg));
+                println!("{}", log::format_message(msg, own.as_deref()));
             }
         }
 
