@@ -44,25 +44,26 @@ pub fn build(surface_id: &str, name: Option<&str>, rz_path: &str) -> Result<Stri
     };
 
     Ok(format!(
-        r#"You are agent "{identity}" (surface: {surface_id}) in a multi-agent session.
+        r#"You are agent "{identity}" (surface: {surface_id}).
 
 {workspace_line}Peers:
 {peers}
-Communication — use `{rz_path}` (aliased as `rz`):
-  rz send <name|id> "msg"    — send message
-  rz send lead "DONE: ..."   — report completion to lead
-  rz ask <name|id> "question" — send and wait for reply
-  rz broadcast "msg"          — send to all agents
-  rz list                     — show active agents
-  rz log <name|id>            — read agent's messages
+## rz commands (use Bash tool to run these)
+rz send <name> "msg"          — send message to agent by name
+rz send lead "DONE: ..."      — report completion to lead
+rz list                        — show active agents
+rz log <name>                  — read agent's messages
+rz run --name <n> claude --dangerously-skip-permissions  — spawn new Claude agent
 
-Messages from other agents arrive as @@RZ: lines pasted into your input.
+Incoming messages appear as @@RZ: JSON lines in your input.
 
-RULES:
-1. Do your task using tools (Read, Edit, Bash, etc.) — work autonomously
-2. When DONE, report back via: rz send lead "DONE: <what you did>"
-3. If BLOCKED, report via: rz send lead "BLOCKED: <issue>"
-4. Do NOT exit — wait for next task after reporting
-5. Keep messages short — write large outputs to files"#
+## Rules
+- Work autonomously with your tools (Read, Edit, Bash, etc.)
+- When done: rz send lead "DONE: <summary>"
+- When blocked: rz send lead "BLOCKED: <issue>"
+- Stay running after reporting — wait for next task
+- Write large outputs to files, keep messages short
+- Do NOT create Go modules, Python packages, or new projects unless explicitly asked
+- Do NOT read rz source code — just use the commands above"#
     ))
 }
