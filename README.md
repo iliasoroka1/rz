@@ -25,17 +25,32 @@ rz solves this with one binary:
 ## Install
 
 ```bash
+# Full version — cmux + file + http + NATS (cross-machine)
+cargo install rz-agent
+
+# Terminal-only — cmux only, smaller binary
 cargo install rz-cmux
 ```
+
+Both install a binary called `rz`. Pick one.
 
 Or from source:
 
 ```bash
-git clone https://github.com/iliasoroka1/rz-cmux
-cd rz-cmux
+git clone https://github.com/iliasoroka1/rz
+cd rz
 cargo build --release
 cp target/release/rz ~/.local/bin/rz
 ```
+
+### Crates
+
+| Crate | Description |
+|---|---|
+| [`rz-agent`](https://crates.io/crates/rz-agent) | Full CLI — all transports (cmux, file, http, NATS) |
+| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | @@RZ: wire format library (use in your own agents) |
+| [`rz-cmux`](https://crates.io/crates/rz-cmux) | Terminal-only CLI (cmux transport only) |
+| [`rz-cmux-protocol`](https://crates.io/crates/rz-cmux-protocol) | @@RZ: wire format (cmux version) |
 
 ---
 
