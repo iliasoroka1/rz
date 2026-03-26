@@ -5,10 +5,10 @@ INSTALL_PATH = $(HOME)/.cargo/bin/rz
 
 build:
 	cargo build --release
-	/usr/bin/codesign -s - -f $(BINARY)
 
 install: build
 	cp $(BINARY) $(INSTALL_PATH)
+	/usr/bin/codesign -s - -f $(INSTALL_PATH)
 
 clean:
 	cargo clean

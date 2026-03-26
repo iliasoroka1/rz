@@ -510,6 +510,15 @@ fn resolve_target(target: &str) -> Result<Target> {
     if is_uuid(target) {
         return Ok(Target::Cmux(target.to_string()));
     }
+    // Fallback: search cmux surface titles for a match.
+    // Surfaces spawned with --name have the name set as their title.
+    if let Ok(surfaces) = cmux::list_surfaces() {
+        for s in &surfaces {
+            if s.title.eq_ignore_ascii_case(target) || s.title.contains(target) {
+                return Ok(Target::Cmux(s.id.clone()));
+            }
+        }
+    }
     // Last resort: if RZ_HUB is set, try NATS
     if rz_cli::nats_hub::hub_url().is_some() {
         return Ok(Target::Nats(target.to_string()));
