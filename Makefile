@@ -11,7 +11,7 @@ install: build
 	/usr/bin/codesign -s - -f $(INSTALL_PATH)
 
 publish: install
-	cargo publish -p rz-agent-protocol
+	-cargo publish -p rz-agent-protocol
 	cargo publish -p rz-agent
 	git push origin main
 
