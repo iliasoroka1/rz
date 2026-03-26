@@ -618,10 +618,26 @@ fn spawn_nats_listener(rz_path: &str, agent_name: &str, deliver: &str) {
 }
 
 fn sender_id(from: Option<&str>) -> String {
-    from.map(String::from)
-        .or_else(|| std::env::var("RZ_AGENT_NAME").ok())
-        .or_else(|| cmux::own_surface_id().ok())
-        .unwrap_or_else(|| "unknown".into())
+    if let Some(f) = from {
+        return f.to_string();
+    }
+    if let Ok(name) = std::env::var("RZ_AGENT_NAME") {
+        return name;
+    }
+    // Look up own ID in names.json to find a human-readable name.
+    if let Ok(own_id) = cmux::own_surface_id().or_else(|_| {
+        // Try zellij pane ID
+        std::env::var("ZELLIJ_PANE_ID").map(|id| format!("terminal_{id}"))
+    }) {
+        let names = load_names();
+        for (name, id) in &names {
+            if id == &own_id {
+                return name.clone();
+            }
+        }
+        return own_id;
+    }
+    "unknown".into()
 }
 
 /// Poll own scrollback for a reply referencing `msg_id`, with timeout.
