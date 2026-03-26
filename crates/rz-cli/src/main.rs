@@ -1,10 +1,10 @@
-//! `rz` — inter-agent messaging over cmux.
+//! `rz` — universal inter-agent messaging (cmux + zellij + NATS).
 
 use clap::{Parser, Subcommand};
 use eyre::{Result, WrapErr, bail};
 
 use rz_agent_protocol::{Envelope, MessageKind};
-use rz_cli::{bootstrap, cmux, log, status};
+use rz_cli::{backend, bootstrap, cmux, log, status};
 
 
 #[derive(Subcommand)]
@@ -547,13 +547,17 @@ fn workspace_path() -> Result<std::path::PathBuf> {
 }
 
 /// Spawn a background `rz listen` process for NATS delivery.
-/// The child inherits our env (including CMUX_SOCKET_PATH) so it has cmux access.
+/// The child inherits our env so it has multiplexer access.
+/// `deliver` should be "cmux:<surface_id>" or "zellij:<pane_id>".
 /// Uses a pidfile to avoid duplicate listeners for the same agent name.
-fn spawn_nats_listener(rz_path: &str, agent_name: &str, surface_id: &str) {
+fn spawn_nats_listener(rz_path: &str, agent_name: &str, deliver: &str) {
     // Pidfile prevents duplicate listeners per agent name per workspace.
+    let session = std::env::var("CMUX_WORKSPACE_ID")
+        .or_else(|_| std::env::var("ZELLIJ_SESSION_NAME"))
+        .unwrap_or_default();
     let pidfile = std::path::PathBuf::from(format!(
         "/tmp/rz-nats-{}-{}.pid",
-        std::env::var("CMUX_WORKSPACE_ID").unwrap_or_default(),
+        session,
         agent_name,
     ));
 
@@ -575,9 +579,8 @@ fn spawn_nats_listener(rz_path: &str, agent_name: &str, surface_id: &str) {
         }
     }
 
-    let deliver = format!("cmux:{surface_id}");
     match std::process::Command::new(rz_path)
-        .args(["listen", agent_name, "--deliver", &deliver])
+        .args(["listen", agent_name, "--deliver", deliver])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -698,44 +701,41 @@ _Fill in the session's primary objective._
             prompt,
             args,
         } => {
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let surface_id = cmux::spawn(&command, &arg_refs, name.as_deref())?;
+            let be = backend::detect()
+                .ok_or_else(|| eyre::eyre!("not inside cmux or zellij — cannot spawn"))?;
 
-            // Register name→UUID mapping if --name was given.
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let surface_id = be.spawn(&command, &arg_refs, name.as_deref())?;
+
+            // Register name→ID mapping if --name was given.
             if let Some(ref n) = name {
                 save_name(n, &surface_id);
             }
 
-            // Always register "lead" → own surface so spawned agents can
-            // resolve `rz send lead ...` without needing NATS or registry.
-            if let Ok(own) = cmux::own_surface_id() {
+            // Register "lead" → own ID so spawned agents can resolve it.
+            if let Ok(own) = be.own_id() {
                 save_name("lead", &own);
 
                 // Auto-start NATS listeners when RZ_HUB is set.
-                // Fork background processes that inherit our cmux env vars
-                // so they have socket access to paste into surfaces.
+                let prefix = be.backend_name(); // "cmux" or "zellij"
                 if rz_cli::nats_hub::hub_url().is_some() {
                     let rz = rz_path();
-                    // Listener for the spawned agent
                     if let Some(ref n) = name {
-                        spawn_nats_listener(&rz, n, &surface_id);
+                        spawn_nats_listener(&rz, n, &format!("{prefix}:{surface_id}"));
                     }
-                    // Listener for lead (idempotent — only starts if not already running)
-                    spawn_nats_listener(&rz, "lead", &own);
+                    spawn_nats_listener(&rz, "lead", &format!("{prefix}:{own}"));
                 }
             }
 
             if !no_bootstrap {
-                // Phase 2: wait up to `wait` secs for Claude (or any agent)
-                // to appear, then settle 5s before sending bootstrap.
-                cmux::wait_for_stable_output(&surface_id, wait, 5);
+                be.wait_for_ready(&surface_id, wait, 5);
 
-                let msg = bootstrap::build(&surface_id, name.as_deref(), &rz_path())?;
-                cmux::send(&surface_id, &msg)?;
+                let msg = bootstrap::build(&surface_id, name.as_deref(), be.as_ref())?;
+                be.send(&surface_id, &msg)?;
 
                 if let Some(task) = prompt {
-                    cmux::wait_for_stable_output(&surface_id, 30, 3);
-                    cmux::send(&surface_id, &task)?;
+                    be.wait_for_ready(&surface_id, 30, 3);
+                    be.send(&surface_id, &task)?;
                 }
             }
 

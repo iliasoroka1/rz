@@ -2,39 +2,31 @@
 
 use eyre::Result;
 
-use crate::cmux;
-
 /// Build bootstrap instructions for a newly spawned agent.
 ///
 /// Kept short so Claude Code processes it quickly. Details are in the
 /// workspace goals.md — agents should read that file for context.
-pub fn build(surface_id: &str, name: Option<&str>, _rz_path: &str) -> Result<String> {
-    let surfaces = cmux::list_surfaces()?;
+pub fn build(surface_id: &str, name: Option<&str>, backend: &dyn crate::backend::Backend) -> Result<String> {
+    let panes = backend.list_panes()?;
     let identity = name.unwrap_or(surface_id);
 
     let mut peers = String::new();
-    for s in &surfaces {
-        if s.surface_type == "browser" || s.id == surface_id {
+    for p in &panes {
+        if p.is_plugin || p.id == surface_id {
             continue;
         }
-        let label = if s.title.is_empty() { "shell" } else { &s.title };
-        peers.push_str(&format!("  - {} ({})\n", s.id, label));
+        let label = if p.title.is_empty() { "shell" } else { &p.title };
+        peers.push_str(&format!("  - {} ({})\n", p.id, label));
     }
     if peers.is_empty() {
         peers.push_str("  (none)\n");
     }
 
     // Check if workspace exists.
-    let workspace = std::env::var("CMUX_SOCKET_PATH")
+    let workspace = backend
+        .session_name()
         .ok()
-        .and_then(|sock| {
-            let stem = std::path::Path::new(&sock)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("cmux")
-                .to_string();
-            Some(format!("/tmp/rz-{stem}"))
-        })
+        .map(|session| format!("/tmp/rz-{session}"))
         .filter(|p| std::path::Path::new(p).exists());
 
     let workspace_line = if let Some(ref ws) = workspace {

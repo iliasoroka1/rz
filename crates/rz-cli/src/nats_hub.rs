@@ -153,6 +153,7 @@ pub fn publish(target_name: &str, envelope: &Envelope) -> Result<()> {
 /// Delivery mode is determined by the `delivery` string:
 /// - `file:<name>` — write to the file-based mailbox via [`crate::mailbox::deliver`]
 /// - `cmux:<surface_id>` — send via [`crate::cmux::send`]
+/// - `zellij:<pane_id>` — send via [`crate::zellij::send`]
 /// - anything else — print the `@@RZ:` line to stdout
 ///
 /// This function blocks forever (listener loop).
@@ -253,7 +254,7 @@ async fn jetstream_consume(
         // before the next one arrives. Without this, rapid back-to-back
         // deliveries cause the second message to land in the input box
         // without Enter being pressed.
-        if delivery.starts_with("cmux:") {
+        if delivery.starts_with("cmux:") || delivery.starts_with("zellij:") {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
     }
@@ -292,7 +293,7 @@ async fn core_subscribe(
             eprintln!("rz: nats: delivery error: {e}");
         }
 
-        if delivery.starts_with("cmux:") {
+        if delivery.starts_with("cmux:") || delivery.starts_with("zellij:") {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
     }
@@ -307,6 +308,9 @@ fn deliver_locally(delivery: &str, envelope: &Envelope) -> Result<()> {
     } else if let Some(surface_id) = delivery.strip_prefix("cmux:") {
         let wire = envelope.encode()?;
         crate::cmux::send(surface_id, &wire)
+    } else if let Some(pane_id) = delivery.strip_prefix("zellij:") {
+        let wire = envelope.encode()?;
+        crate::zellij::send(pane_id, &wire)
     } else {
         let wire = envelope.encode()?;
         println!("{wire}");

@@ -1,3 +1,4 @@
 [workspace]
 members = ["crates/rz-protocol", "crates/rz-cli"]
+exclude = ["crates/rz-hub"]  # WASM plugin — build with: cargo build -p rz-hub --target wasm32-wasip1
 resolver = "2"
