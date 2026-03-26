@@ -28,15 +28,10 @@ pub struct Envelope {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum MessageKind {
     Chat { text: String },
-    Hello { name: String, pane_id: String },
     Ping,
     Pong,
     Error { message: String },
     Timer { label: String },
-    ToolCall { name: String, args: serde_json::Value, call_id: String },
-    ToolResult { call_id: String, result: String, is_error: bool },
-    Delegate { task: String, context: String },
-    Status { state: String, detail: String },
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);

@@ -150,14 +150,9 @@ Every message is a single line: `@@RZ:<json>`
 | Kind | Body | Purpose |
 |---|---|---|
 | `chat` | `{text}` | General communication |
-| `hello` | `{name, pane_id}` | Agent announcement |
 | `ping` / `pong` | — | Liveness check |
 | `error` | `{message}` | Error report |
 | `timer` | `{label}` | Self-scheduled wakeup |
-| `tool_call` | `{name, args, call_id}` | Remote tool invocation |
-| `tool_result` | `{call_id, result, is_error}` | Tool response |
-| `delegate` | `{task, context}` | Task delegation |
-| `status` | `{state, detail}` | Progress update |
 
 ---
 

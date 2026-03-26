@@ -51,9 +51,6 @@ pub fn format_message(envelope: &Envelope, own_id: Option<&str>) -> String {
 
     let text = match &envelope.kind {
         MessageKind::Chat { text } => text.as_str(),
-        MessageKind::Hello { name, pane_id } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> hello ({name}, {pane_id})", envelope.from);
-        }
         MessageKind::Ping => "ping",
         MessageKind::Pong => "pong",
         MessageKind::Error { message } => {
@@ -61,19 +58,6 @@ pub fn format_message(envelope: &Envelope, own_id: Option<&str>) -> String {
         }
         MessageKind::Timer { label } => {
             return format!("[{h:02}:{m:02}:{s:02}] {}{me}> timer: {label}", envelope.from);
-        }
-        MessageKind::ToolCall { name, call_id, .. } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> tool_call: {name} ({call_id})", envelope.from);
-        }
-        MessageKind::ToolResult { call_id, result, is_error } => {
-            let tag = if *is_error { "tool_error" } else { "tool_result" };
-            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> {tag}: {result} ({call_id})", envelope.from);
-        }
-        MessageKind::Delegate { task, .. } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> delegate: {task}", envelope.from);
-        }
-        MessageKind::Status { state, detail } => {
-            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> status: {state} — {detail}", envelope.from);
         }
     };
 
