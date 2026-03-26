@@ -5,7 +5,7 @@
 Works with any AI coding agent — [Claude Code](https://claude.ai/code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), or any process that reads terminal input. No SDK, no framework — just a CLI tool that injects messages into terminals.
 
 Three ways to run:
-- **`rz run`** — inside [cmux](https://cmux.dev) or [zellij](https://zellij.dev) (spawns panes, auto-detects)
+- **`rz run`** — inside [tmux](https://github.com/tmux/tmux), [cmux](https://cmux.dev), or [zellij](https://zellij.dev) (spawns panes, auto-detects)
 - **`rz agent`** — in any plain terminal (PTY wrapping, no multiplexer needed)
 - **NATS** — bridge agents across machines, multiplexers, or both
 
@@ -69,10 +69,10 @@ rz send worker "refactor the auth module"
                                           └───────────────────────┘
 ```
 
-### Inside a multiplexer (cmux / zellij)
+### Inside a multiplexer (tmux / cmux / zellij)
 
 ```bash
-# Auto-detects cmux or zellij, spawns panes
+# Auto-detects your multiplexer, spawns panes
 rz run --name lead -p "refactor auth" claude --dangerously-skip-permissions
 rz run --name coder -p "implement tokens" claude --dangerously-skip-permissions
 
@@ -87,15 +87,15 @@ rz send lead "wrap up"     # intervene
 Agents on different machines, in different multiplexers, or in plain terminals — all talk through NATS:
 
 ```bash
-# Machine A (cmux)
+# Machine A (tmux)
 export RZ_HUB=nats://nats.example.com:4222
 rz run --name worker claude --dangerously-skip-permissions
 
 # Machine B (plain terminal, no multiplexer)
 export RZ_HUB=nats://nats.example.com:4222
-rz agent --name reviewer -- claude --dangerously-skip-permissions
+rz agent --name reviewer -- gemini
 
-# Machine C (zellij)
+# Machine C (cmux)
 export RZ_HUB=nats://nats.example.com:4222
 rz send worker "implement feature X"
 rz send reviewer "review worker's changes"
@@ -128,17 +128,19 @@ The `@@RZ:` prefix lets agents distinguish protocol messages from normal termina
 
 ## Backends
 
-| Backend | How to use | Best for |
-|---|---|---|
-| PTY agent | `rz agent --name X -- <cmd>` | Any terminal, SSH, CI, remote servers |
-| cmux | `rz run --name X <cmd>` (auto-detected) | Claude Code desktop app |
-| zellij | `rz run --name X <cmd>` (auto-detected) | Zellij terminal users |
+| Backend | How to use | Detection | Best for |
+|---|---|---|---|
+| PTY agent | `rz agent --name X -- <cmd>` | manual | Any terminal, SSH, CI, remote servers |
+| tmux | `rz run --name X <cmd>` | `TMUX` env | tmux users |
+| cmux | `rz run --name X <cmd>` | `CMUX_SURFACE_ID` env | Claude Code desktop app |
+| zellij | `rz run --name X <cmd>` | `ZELLIJ` env | Zellij terminal users |
 
 ## Transports
 
 | Transport | Delivery | Best for |
 |---|---|---|
 | `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, cross-backend, PTY agents |
+| `tmux` | `tmux send-keys` into pane | Local tmux agents |
 | `cmux` | Paste into cmux surface | Local cmux agents |
 | `zellij` | Paste into zellij pane | Local zellij agents |
 | `file` | Write to `~/.rz/mailboxes/<name>/inbox/` | Universal fallback |
@@ -177,7 +179,7 @@ The `@@RZ:` prefix lets agents distinguish protocol messages from normal termina
 | `rz listen <name> --deliver <method>` | Subscribe and deliver locally |
 | `rz timer 30 "label"` | Schedule a self-wakeup |
 
-Delivery methods: `stdout`, `file`, `cmux:<id>`, `zellij:<pane_id>`
+Delivery methods: `stdout`, `file`, `cmux:<id>`, `zellij:<pane_id>`, `tmux:<pane_id>`
 
 ### Observe
 | Command | Description |
@@ -204,6 +206,7 @@ rz/
 │   │   ├── main.rs           # CLI + auto-detect backend
 │   │   ├── backend.rs        # Backend trait (CmuxBackend, ZellijBackend)
 │   │   ├── pty.rs            # PTY agent (no multiplexer needed)
+│   │   ├── tmux.rs           # tmux CLI wrapper
 │   │   ├── cmux.rs           # cmux socket client
 │   │   ├── zellij.rs         # zellij CLI wrapper
 │   │   ├── nats_hub.rs       # NATS (JetStream + core)
