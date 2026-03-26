@@ -1,10 +1,10 @@
 # rz
 
-**Universal messaging for AI agents — cmux, zellij, NATS, or anywhere.**
+**Universal messaging for AI agents — cmux, zellij, NATS, or any terminal.**
 
-One binary that works in both [cmux](https://cmux.dev) and [zellij](https://zellij.dev) terminal multiplexers. Spawn agents, send messages, bridge across machines with NATS — `rz send peer "hello"` works the same way everywhere.
+One binary that works in [cmux](https://cmux.dev), [zellij](https://zellij.dev), or **any plain terminal** via PTY wrapping. Spawn agents, send messages, bridge across machines with NATS — `rz send peer "hello"` works the same way everywhere.
 
-Auto-detects your multiplexer from environment variables (`CMUX_SURFACE_ID` or `ZELLIJ`).
+Auto-detects your environment: cmux (`CMUX_SURFACE_ID`), zellij (`ZELLIJ`), or use `rz agent` for any terminal.
 
 **Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg). Zellij support based on [meepo/rz](https://github.com/meepo/rz).
 
@@ -36,10 +36,10 @@ make install    # builds, signs, copies to ~/.cargo/bin/
 
 ## Quick start
 
-Works identically in cmux and zellij:
+### Inside a multiplexer (cmux / zellij)
 
 ```bash
-# Spawn agents
+# Spawn agents (auto-detects your multiplexer)
 rz run --name lead -p "refactor auth, spawn helpers" claude --dangerously-skip-permissions
 rz run --name coder -p "implement session tokens" claude --dangerously-skip-permissions
 
@@ -49,7 +49,31 @@ rz log lead                # read lead's messages
 rz send lead "wrap up"     # intervene
 ```
 
-### Cross-multiplexer (NATS)
+### Any terminal (no multiplexer needed)
+
+```bash
+# Start a NATS server
+nats-server -js
+export RZ_HUB=nats://localhost:4222
+
+# Run an agent with PTY wrapping — works in any terminal
+rz agent --name worker -- claude --dangerously-skip-permissions
+```
+
+`rz agent` creates a pseudo-terminal, wraps the command, and subscribes to NATS. Incoming messages are injected directly into the child's input as `@@RZ:` lines. No cmux or zellij required.
+
+```
+┌──────────────┐       ┌──────────┐       ┌──────────────────────┐
+│ rz send      │──pub──│  NATS    │──sub──│ rz agent --name X    │
+│ worker "msg" │       │ agent.X  │       │  ├─ NATS subscriber  │
+└──────────────┘       └──────────┘       │  ├─ writes @@RZ: to  │
+                                          │  │  PTY master fd    │
+                                          │  └─ child sees it    │
+                                          │     as typed input   │
+                                          └──────────────────────┘
+```
+
+### Cross-machine / cross-multiplexer (NATS)
 
 Agents in cmux and zellij can talk to each other via NATS:
 
@@ -88,12 +112,13 @@ rz recv worker --one       # pop oldest message
 
 ## Backends
 
-rz auto-detects the terminal multiplexer:
+rz auto-detects the environment:
 
 | Backend | Detection | Pane IDs | Best for |
 |---|---|---|---|
 | cmux | `CMUX_SURFACE_ID` env | UUIDs (`B237E171-...`) | Claude Code desktop app |
-| zellij | `ZELLIJ` env | Numeric (`terminal_3`) | Terminal users |
+| zellij | `ZELLIJ` env | Numeric (`terminal_3`) | Zellij terminal users |
+| PTY agent | `rz agent --name X` | Agent name | Any terminal, remote servers, CI |
 
 Both backends support the same commands. Backend-specific features:
 
@@ -161,7 +186,8 @@ Every message is a single line: `@@RZ:<json>`
 ### Agent lifecycle
 | Command | Description |
 |---|---|
-| `rz run <cmd> --name X -p "task"` | Spawn agent with bootstrap + task |
+| `rz run <cmd> --name X -p "task"` | Spawn agent in multiplexer pane |
+| `rz agent --name X -- <cmd>` | Run agent with PTY wrapping (no multiplexer needed) |
 | `rz list` / `rz ps` | List all agents — shows `(me)` next to your own |
 | `rz close <target>` / `rz kill` | Close a pane/surface |
 | `rz ping <target>` | Check liveness, measure RTT |
@@ -240,6 +266,7 @@ rz/
 │   │   ├── backend.rs        # Backend trait + CmuxBackend + ZellijBackend
 │   │   ├── cmux.rs           # cmux socket client
 │   │   ├── zellij.rs         # zellij CLI wrapper
+│   │   ├── pty.rs            # PTY agent wrapper (no multiplexer)
 │   │   ├── nats_hub.rs       # NATS transport (JetStream + core)
 │   │   ├── registry.rs       # Agent discovery (~/.rz/registry.json)
 │   │   ├── mailbox.rs        # File-based message store
