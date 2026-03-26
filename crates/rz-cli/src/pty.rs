@@ -95,8 +95,16 @@ pub fn run_agent(name: &str, command: &[String], _no_bootstrap: bool) -> Result<
                 close(slave_raw).ok();
             }
 
-            // Set env vars
+            // Set env vars for the child
             std::env::set_var("RZ_AGENT_NAME", name);
+
+            // Clear multiplexer env vars so the child's `rz send` routes
+            // through NATS instead of trying to paste into cmux/zellij.
+            std::env::remove_var("CMUX_SURFACE_ID");
+            std::env::remove_var("CMUX_WORKSPACE_ID");
+            std::env::remove_var("CMUX_SOCKET_PATH");
+            std::env::remove_var("ZELLIJ");
+            std::env::remove_var("ZELLIJ_SESSION_NAME");
 
             // execvp
             let c_cmd = CString::new(command[0].as_str()).expect("invalid command");
@@ -131,11 +139,15 @@ pub fn run_agent(name: &str, command: &[String], _no_bootstrap: bool) -> Result<
     };
 
     // Phase 5: NATS subscriber thread
+    // Wait for the child process to fully start before accepting messages.
+    // Claude Code takes several seconds to load its TUI.
     let (msg_tx, msg_rx) = mpsc::channel::<Envelope>();
 
     let nats_name = name.to_string();
     if crate::nats_hub::hub_url().is_some() {
         std::thread::spawn(move || {
+            // Delay before subscribing — give the child time to start.
+            std::thread::sleep(Duration::from_secs(10));
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -315,12 +327,15 @@ pub fn run_agent(name: &str, command: &[String], _no_bootstrap: bool) -> Result<
             }
         }
 
-        // Check for incoming NATS messages
-        while let Ok(envelope) = msg_rx.try_recv() {
+        // Check for incoming NATS messages — inject one at a time with delay
+        if let Ok(envelope) = msg_rx.try_recv() {
             if let Ok(wire) = envelope.encode() {
-                let line = format!("{wire}\r");
-                let _ = write_all_fd(master_raw, line.as_bytes());
-                std::thread::sleep(Duration::from_millis(200));
+                // Write the @@RZ: line, then CR to submit
+                let _ = write_all_fd(master_raw, wire.as_bytes());
+                std::thread::sleep(Duration::from_millis(100));
+                let _ = write_all_fd(master_raw, b"\r");
+                // Wait for the TUI to process before injecting next message
+                std::thread::sleep(Duration::from_millis(1500));
             }
         }
     }
