@@ -8,7 +8,7 @@ use crate::cmux;
 ///
 /// Kept short so Claude Code processes it quickly. Details are in the
 /// workspace goals.md — agents should read that file for context.
-pub fn build(surface_id: &str, name: Option<&str>, rz_path: &str) -> Result<String> {
+pub fn build(surface_id: &str, name: Option<&str>, _rz_path: &str) -> Result<String> {
     let surfaces = cmux::list_surfaces()?;
     let identity = name.unwrap_or(surface_id);
 
