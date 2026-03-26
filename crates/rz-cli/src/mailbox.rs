@@ -5,7 +5,7 @@
 //! (write to `.tmp` then rename).
 
 use eyre::{Context, Result};
-use rz_protocol::Envelope;
+use rz_agent_protocol::Envelope;
 use std::fs;
 use std::path::PathBuf;
 

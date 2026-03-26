@@ -953,14 +953,14 @@ dependencies = [
  "clap",
  "eyre",
  "futures",
- "rz-protocol",
+ "rz-agent-protocol",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "rz-protocol"
+name = "rz-agent-protocol"
 version = "0.1.0"
 dependencies = [
  "eyre",

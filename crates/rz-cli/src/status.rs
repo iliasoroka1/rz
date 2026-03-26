@@ -1,7 +1,7 @@
 //! Surface status summary for the `status` subcommand.
 
 use crate::cmux::SurfaceInfo;
-use rz_protocol::SENTINEL;
+use rz_agent_protocol::SENTINEL;
 
 /// Per-surface status line.
 pub struct SurfaceStatus {

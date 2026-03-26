@@ -6,7 +6,7 @@
 //! - **Http** — POSTs envelope JSON to a remote endpoint (shells out to curl)
 
 use eyre::{bail, Result};
-use rz_protocol::Envelope;
+use rz_agent_protocol::Envelope;
 use std::fs;
 use std::path::PathBuf;
 

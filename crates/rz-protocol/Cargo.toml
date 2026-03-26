@@ -1,5 +1,5 @@
 [package]
-name = "rz-protocol"
+name = "rz-agent-protocol"
 version = "0.1.0"
 edition = "2021"
 description = "@@RZ: wire protocol for inter-agent messaging (transport-agnostic)"

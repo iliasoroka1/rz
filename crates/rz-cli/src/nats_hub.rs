@@ -4,7 +4,7 @@
 //! (e.g. `nats://localhost:4222`) and routes messages over `agent.<name>` subjects.
 
 use eyre::{bail, Result};
-use rz_protocol::Envelope;
+use rz_agent_protocol::Envelope;
 
 /// Read the NATS hub URL from the `RZ_HUB` environment variable.
 pub fn hub_url() -> Option<String> {

@@ -1,6 +1,6 @@
 //! Helpers for extracting and formatting protocol messages from scrollback.
 
-use rz_protocol::{Envelope, MessageKind, SENTINEL};
+use rz_agent_protocol::{Envelope, MessageKind, SENTINEL};
 
 /// Scan scrollback text for `@@RZ:` lines and parse each into an [`Envelope`].
 ///

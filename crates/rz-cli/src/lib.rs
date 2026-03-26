@@ -14,4 +14,4 @@ pub mod registry;
 pub mod status;
 pub mod transport;
 
-pub use rz_protocol::{Envelope, MessageKind, SENTINEL};
+pub use rz_agent_protocol::{Envelope, MessageKind, SENTINEL};

@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 use eyre::{Result, WrapErr, bail};
 
-use rz_protocol::{Envelope, MessageKind};
+use rz_agent_protocol::{Envelope, MessageKind};
 use rz_cli::{bootstrap, cmux, log, status};
 
 
