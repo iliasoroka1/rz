@@ -1,75 +1,56 @@
 # rz
 
-**Universal messaging for AI agents — terminal, HTTP, or anywhere.**
+**Universal messaging for AI agents — terminal, NATS, HTTP, or anywhere.**
 
-rz gives AI agents a native way to find each other and communicate, regardless of where they run. Spawn Claude into a terminal split, register an HTTP agent, or drop messages into a file mailbox — `rz send peer "hello"` works the same way everywhere.
+rz gives AI agents a native way to find each other and communicate, regardless of where they run. Spawn Claude into a terminal split, register an HTTP agent, or bridge agents across machines with NATS — `rz send peer "hello"` works the same way everywhere.
 
-**Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg). The `@@RZ:` wire protocol is unchanged from the original — this fork adds transport-agnostic routing, a universal agent registry, and file-based mailboxes alongside the original cmux terminal support.
-
----
-
-## Why rz
-
-AI coding agents need to talk to each other. A lead agent delegates to coders, reviewers report back, CI bots notify the team. But agents run in different environments — terminals, HTTP servers, IDE extensions, CI pipelines — and can't natively discover or message each other.
-
-rz solves this with one binary:
-
-- **Universal registry.** Agents register once (`rz register --name coder --transport file`). Any agent can find any other with `rz ps`.
-- **Pluggable transports.** Messages route through cmux (terminal paste), file mailbox (universal), or HTTP (network agents). The sender doesn't need to know — `rz send coder "do X"` just works.
-- **Structured protocol.** Every message is an `@@RZ:` JSON envelope with ID, sender, recipient, threading, and typed payloads (chat, tool calls, delegation, status).
-- **File mailbox.** The universal fallback — works everywhere, survives crashes, debuggable with `ls` and `cat`. No daemon needed.
-- **Agent spawning.** `rz run claude --name worker -p "do X"` spawns a new agent with identity, peer list, and a task — all in one command.
+**Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg). The `@@RZ:` wire protocol is unchanged from the original — this fork adds transport-agnostic routing, a universal agent registry, NATS cross-machine messaging, and file-based mailboxes alongside the original cmux terminal support.
 
 ---
 
 ## Install
 
 ```bash
-# Full version — cmux + file + http + NATS (cross-machine)
 cargo install rz-agent
-
-# Terminal-only — cmux only, smaller binary
-cargo install rz-cmux
 ```
 
-Both install a binary called `rz`. Pick one.
+This installs a binary called `rz`.
 
-Or from source:
+From source (macOS requires codesign):
 
 ```bash
 git clone https://github.com/iliasoroka1/rz
 cd rz
-cargo build --release
-cp target/release/rz ~/.local/bin/rz
+make install    # builds, signs, copies to ~/.cargo/bin/
 ```
 
 ### Crates
 
 | Crate | Description |
 |---|---|
-| [`rz-agent`](https://crates.io/crates/rz-agent) | Full CLI — all transports (cmux, file, http, NATS) |
-| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | @@RZ: wire format library (use in your own agents) |
-| [`rz-cmux`](https://crates.io/crates/rz-cmux) | Terminal-only CLI (cmux transport only) |
-| [`rz-cmux-protocol`](https://crates.io/crates/rz-cmux-protocol) | @@RZ: wire format (cmux version) |
+| [`rz-agent`](https://crates.io/crates/rz-agent) | CLI — all transports (cmux, file, http, NATS) |
+| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | `@@RZ:` wire format library (use in your own agents) |
 
 ---
 
 ## Quick start
 
-### Terminal agents (cmux)
+### Spawn Claude agents
 
 ```bash
-# Spawn a team
+# Spawn a lead agent with a task
 rz run --name lead -p "refactor auth, spawn helpers" claude --dangerously-skip-permissions
+
+# Spawn a worker
 rz run --name coder -p "implement session tokens" claude --dangerously-skip-permissions
 
-# Observe
+# Observe and interact
 rz list                    # see who's alive
 rz log lead                # read lead's messages
 rz send lead "wrap up"     # intervene
 ```
 
-### Any agent (universal)
+### Universal agents (file mailbox, HTTP)
 
 ```bash
 # Register agents with different transports
@@ -86,79 +67,48 @@ rz recv worker --one       # pop oldest message only
 rz recv worker --count     # just show how many are waiting
 ```
 
+### Cross-machine (NATS)
+
+For agents on different machines, rz uses [NATS](https://nats.io) as a message bus:
+
+```bash
+# Start a NATS server (or use a hosted one)
+nats-server -js
+
+# Set the hub URL (add to your shell profile)
+export RZ_HUB=nats://localhost:4222
+
+# Machine A: listen for messages and deliver to a cmux agent
+rz listen worker --deliver "cmux:<surface_id>"
+
+# Machine B: send — routes through NATS automatically
+rz send worker "process batch 42"
+```
+
+With JetStream enabled (`-js`), messages survive agent restarts and offline periods.
+
 ---
 
-## Architecture
-
-```
-~/.rz/
-  registry.json              # who's alive, how to reach them
-  mailboxes/
-    <agent-name>/
-      inbox/                 # one JSON file per message
-        1774488000_a1b2.json
-        1774488001_c3d4.json
-
-rz-cmux/
-├── crates/
-│   ├── rz-protocol/         # @@RZ: wire format (transport-agnostic)
-│   │   └── lib.rs           # Envelope, MessageKind, encode/decode
-│   └── rz-cli/
-│       ├── main.rs          # CLI commands
-│       ├── registry.rs      # Agent discovery (~/.rz/registry.json)
-│       ├── mailbox.rs       # File-based message store
-│       ├── transport.rs     # Pluggable delivery (cmux, file, http)
-│       ├── cmux.rs          # cmux socket client
-│       ├── bootstrap.rs     # Agent bootstrap message
-│       ├── log.rs           # @@RZ: message extraction
-│       └── status.rs        # Session status
-```
-
-### Transports
+## Transports
 
 | Transport | Delivery method | Best for |
 |---|---|---|
 | `cmux` | Paste into terminal via cmux socket | Terminal agents (Claude Code) |
 | `file` | Write JSON to `~/.rz/mailboxes/<name>/inbox/` | Universal — works everywhere |
-| `http` | POST @@RZ: envelope to URL | Network agents (tinyclaw, APIs) |
+| `http` | POST `@@RZ:` envelope to URL | Network agents, APIs |
 | `nats` | Publish to NATS subject `agent.<name>` | Cross-machine agent coordination |
 
-### NATS hub (cross-machine)
-
-For agents on different machines, rz uses [NATS](https://nats.io) as a message bus. Set `RZ_HUB` and agents can talk across the network:
-
-```bash
-# Start a NATS server (or use a hosted one)
-nats-server
-
-# On machine A
-export RZ_HUB=nats://nats.example.com:4222
-rz register --name worker --transport nats
-
-# On machine B
-export RZ_HUB=nats://nats.example.com:4222
-rz send worker "process batch 42"
-```
-
-How it works:
-1. Sender can't find `worker` locally (not in cmux names, not in registry)
-2. `RZ_HUB` is set, so rz publishes the `@@RZ:` envelope to NATS subject `agent.worker`
-3. On machine A, `rz listen worker --deliver file` subscribes to `agent.worker` and delivers incoming messages to the file mailbox
-4. Worker picks them up with `rz recv worker`
-
-NATS is the only transport that crosses machine boundaries. The others (cmux, file, http) are local.
-
-### Message flow
+### Message routing
 
 ```
 rz send coder "implement auth"
     │
     ├── resolve "coder" → check cmux names → check ~/.rz/registry.json
     │
-    ├── transport = cmux?  → paste @@RZ: envelope into terminal
-    ├── transport = file?  → write envelope to ~/.rz/mailboxes/coder/inbox/
-    ├── transport = http?  → POST envelope to registered URL
-    └── transport = nats?  → publish to NATS subject agent.coder (via RZ_HUB)
+    ├── cmux?  → paste @@RZ: envelope into terminal
+    ├── file?  → write to ~/.rz/mailboxes/coder/inbox/
+    ├── http?  → POST to registered URL
+    └── nats?  → publish to agent.coder (via RZ_HUB)
 ```
 
 ---
@@ -196,57 +146,86 @@ Every message is a single line: `@@RZ:<json>`
 
 ## Commands
 
-### Discovery & identity
-| Command | Description |
-|---|---|
-| `rz id` | Print this surface's ID |
-| `rz list` / `rz ps` | List all surfaces and registered agents — shows `(me)` next to your own |
-| `rz status` | Surface counts and message counts |
-| `rz register --name X --transport T` | Register agent in universal registry |
-| `rz deregister X` | Remove agent from registry |
-
-### Messaging
-| Command | Description |
-|---|---|
-| `rz send <target> "msg"` | Send @@RZ: message (routes via registry) |
-| `rz send --ref <id> <target> "msg"` | Reply to specific message (threading) |
-| `rz send --wait 30 <target> "msg"` | Send and block for reply |
-| `rz ask <target> "msg"` | Shorthand for send + wait |
-| `rz broadcast "msg"` | Send to all agents |
-| `rz recv <name>` | Read messages from file mailbox |
-| `rz recv <name> --one` | Pop oldest message |
-| `rz recv <name> --count` | Count pending messages |
-
 ### Agent lifecycle
 | Command | Description |
 |---|---|
 | `rz run <cmd> --name X -p "task"` | Spawn agent with bootstrap + task |
+| `rz list` / `rz ps` | List all agents — shows `(me)` next to your own |
 | `rz close <target>` / `rz kill` | Close a surface |
 | `rz ping <target>` | Check liveness, measure RTT |
-| `rz timer 30 "label"` | Self-deliver Timer message after N seconds |
 
-### Workspace
+### Messaging
 | Command | Description |
 |---|---|
-| `rz init` | Create shared workspace |
-| `rz dir` | Print workspace path |
-| `rz workspace create` | New cmux workspace |
+| `rz send <target> "msg"` | Send `@@RZ:` message (auto-routes) |
+| `rz send --ref <id> <target> "msg"` | Reply to specific message (threading) |
+| `rz send --wait 30 <target> "msg"` | Send and block for reply |
+| `rz ask <target> "msg"` | Shorthand for send + wait |
+| `rz broadcast "msg"` | Send to all agents |
+
+### Discovery
+| Command | Description |
+|---|---|
+| `rz id` | Print this surface's ID |
+| `rz register --name X --transport T` | Register agent in universal registry |
+| `rz deregister X` | Remove agent from registry |
+| `rz status` | Surface counts and message stats |
+
+### File mailbox
+| Command | Description |
+|---|---|
+| `rz recv <name>` | Read and consume all pending messages |
+| `rz recv <name> --one` | Pop oldest message |
+| `rz recv <name> --count` | Count pending messages |
+
+### NATS
+| Command | Description |
+|---|---|
+| `rz listen <name> --deliver <method>` | Subscribe to NATS subject, deliver locally |
+| `rz timer 30 "label"` | Self-deliver Timer message after N seconds |
 
 ### Observation
 | Command | Description |
 |---|---|
-| `rz log <target>` | Show @@RZ: protocol messages — marks `(me)` on your own |
+| `rz log <target>` | Show `@@RZ:` protocol messages |
 | `rz dump <target>` | Full terminal scrollback |
 | `rz gather <id1> <id2>` | Collect last message from each agent |
-| `rz listen <name> --deliver file` | Subscribe to NATS subject and deliver to mailbox |
 
-### Browser (cmux only)
+### Workspace
+| Command | Description |
+|---|---|
+| `rz init` | Create shared workspace (`/tmp/rz-cmux-<id>/`) |
+| `rz dir` | Print workspace path |
+
+### Browser (cmux)
 | Command | Description |
 |---|---|
 | `rz browser open <url>` | Open browser split |
 | `rz browser screenshot <id>` | Take screenshot |
 | `rz browser eval <id> "js"` | Run JavaScript |
 | `rz browser click <id> "sel"` | Click element |
+
+---
+
+## Project structure
+
+```
+rz/
+├── crates/
+│   ├── rz-protocol/       # @@RZ: wire format (transport-agnostic)
+│   │   └── lib.rs          # Envelope, MessageKind, encode/decode
+│   └── rz-cli/
+│       ├── main.rs          # CLI commands + routing
+│       ├── cmux.rs          # cmux socket client (terminal paste)
+│       ├── nats_hub.rs      # NATS transport (JetStream + core)
+│       ├── registry.rs      # Agent discovery (~/.rz/registry.json)
+│       ├── mailbox.rs       # File-based message store
+│       ├── transport.rs     # Pluggable delivery abstraction
+│       ├── bootstrap.rs     # Agent bootstrap message
+│       ├── log.rs           # @@RZ: message extraction
+│       └── status.rs        # Session status
+└── Makefile                 # build + codesign + install
+```
 
 ---
 
