@@ -8,7 +8,7 @@ pub mod bootstrap;
 pub mod cmux;
 pub mod log;
 pub mod mailbox;
-#[cfg(feature = "nats")]
+
 pub mod nats_hub;
 pub mod registry;
 pub mod status;

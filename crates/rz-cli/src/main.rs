@@ -415,7 +415,7 @@ enum Cmd {
     ///   rz listen myagent
     ///   rz listen myagent --deliver file
     ///   rz listen myagent --deliver cmux:<surface_id>
-    #[cfg(feature = "nats")]
+    
     Listen {
         /// Agent name to listen for.
         name: String,
@@ -651,7 +651,7 @@ _Fill in the session's primary objective._
                         }
                     }
                 }
-                #[cfg(feature = "nats")]
+                
                 Err(_) if std::env::var("RZ_HUB").is_ok() && !pane.contains('-') => {
                     // Target not found locally but RZ_HUB is set and target
                     // looks like a name (no dashes) — try NATS as fallback.
@@ -958,7 +958,7 @@ _Fill in the session's primary objective._
             println!("deregistered: {}", name);
         }
 
-        #[cfg(feature = "nats")]
+        
         Cmd::Listen { name, deliver } => {
             rz_cli::nats_hub::subscribe_and_deliver(&name, &deliver)?;
         }

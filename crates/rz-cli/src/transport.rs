@@ -18,7 +18,7 @@ pub enum Transport {
     Cmux,
     File,
     Http,
-    #[cfg(feature = "nats")]
+    
     Nats,
 }
 
@@ -28,7 +28,7 @@ pub fn parse_transport(s: &str) -> Result<Transport> {
         "cmux" => Ok(Transport::Cmux),
         "file" => Ok(Transport::File),
         "http" | "https" => Ok(Transport::Http),
-        #[cfg(feature = "nats")]
+        
         "nats" => Ok(Transport::Nats),
         other => bail!("unknown transport type: '{}' (expected cmux, file, or http)", other),
     }
@@ -45,7 +45,7 @@ pub fn deliver(transport: &Transport, endpoint: &str, envelope: &Envelope) -> Re
         Transport::Cmux => deliver_cmux(endpoint, envelope),
         Transport::File => deliver_file(endpoint, envelope),
         Transport::Http => deliver_http(endpoint, envelope),
-        #[cfg(feature = "nats")]
+        
         Transport::Nats => deliver_nats(endpoint, envelope),
     }
 }
@@ -87,7 +87,7 @@ fn deliver_file(agent_name: &str, envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "nats")]
+
 fn deliver_nats(endpoint: &str, envelope: &Envelope) -> Result<()> {
     crate::nats_hub::publish(endpoint, envelope)
 }
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(parse_transport("file").unwrap(), Transport::File);
         assert_eq!(parse_transport("http").unwrap(), Transport::Http);
         assert_eq!(parse_transport("https").unwrap(), Transport::Http);
-        #[cfg(feature = "nats")]
+        
         assert_eq!(parse_transport("nats").unwrap(), Transport::Nats);
         assert!(parse_transport("tcp").is_err());
     }
