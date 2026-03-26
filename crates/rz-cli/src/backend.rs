@@ -184,19 +184,52 @@ impl Backend for ZellijBackend {
 }
 
 // ---------------------------------------------------------------------------
+// TmuxBackend
+// ---------------------------------------------------------------------------
+
+pub struct TmuxBackend;
+
+impl Backend for TmuxBackend {
+    fn own_id(&self) -> Result<String> { crate::tmux::own_pane_id() }
+    fn send(&self, target: &str, text: &str) -> Result<()> { crate::tmux::send(target, text) }
+    fn spawn(&self, cmd: &str, args: &[&str], name: Option<&str>) -> Result<String> { crate::tmux::spawn(cmd, args, name) }
+    fn close(&self, target: &str) -> Result<()> { crate::tmux::close(target) }
+    fn list_panes(&self) -> Result<Vec<PaneInfo>> {
+        let panes = crate::tmux::list_panes()?;
+        Ok(panes.into_iter().map(|p| PaneInfo {
+            id: p.id,
+            title: p.title,
+            is_plugin: false,
+            is_focused: p.active,
+            running: true,
+        }).collect())
+    }
+    fn list_pane_ids(&self) -> Result<Vec<String>> { crate::tmux::list_pane_ids() }
+    fn read_scrollback(&self, target: &str) -> Result<String> { crate::tmux::dump(target) }
+    fn normalize_id(&self, input: &str) -> String { crate::tmux::normalize_pane_id(input) }
+    fn wait_for_ready(&self, target: &str, max_secs: u64, settle_secs: u64) { crate::tmux::wait_for_stable_output(target, max_secs, settle_secs); }
+    fn session_name(&self) -> Result<String> { crate::tmux::session_name() }
+    fn backend_name(&self) -> &str { "tmux" }
+}
+
+// ---------------------------------------------------------------------------
 // Auto-detect
 // ---------------------------------------------------------------------------
 
 /// Detect the active backend from environment variables.
 ///
 /// Returns `Some(CmuxBackend)` if `CMUX_SURFACE_ID` is set,
-/// `Some(ZellijBackend)` if `ZELLIJ` is set, or `None` otherwise.
+/// `Some(ZellijBackend)` if `ZELLIJ` is set,
+/// `Some(TmuxBackend)` if `TMUX` is set, or `None` otherwise.
 pub fn detect() -> Option<Box<dyn Backend>> {
     if std::env::var("CMUX_SURFACE_ID").is_ok() {
         return Some(Box::new(CmuxBackend));
     }
     if std::env::var("ZELLIJ").is_ok() {
         return Some(Box::new(ZellijBackend));
+    }
+    if std::env::var("TMUX").is_ok() {
+        return Some(Box::new(TmuxBackend));
     }
     None
 }

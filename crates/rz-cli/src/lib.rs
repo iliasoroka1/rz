@@ -15,6 +15,7 @@ pub mod nats_hub;
 pub mod registry;
 pub mod status;
 pub mod transport;
+pub mod tmux;
 pub mod zellij;
 
 pub use rz_agent_protocol::{Envelope, MessageKind, SENTINEL};
