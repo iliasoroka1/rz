@@ -225,19 +225,34 @@ pub fn subscribe_and_deliver(agent_name: &str, delivery: &str) -> Result<()> {
             .await
             .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
 
-        // Try JetStream consumer first
         let js = async_nats::jetstream::new(client.clone());
-        if ensure_stream(&js, agent_name).await.is_ok() {
-            match jetstream_consume(&js, agent_name, delivery).await {
-                Ok(()) => return Ok(()), // won't return unless stream disappears
+
+        // Retry loop — reconnect JetStream consumer if it drops
+        loop {
+            if ensure_stream(&js, agent_name).await.is_ok() {
+                match jetstream_consume(&js, agent_name, delivery).await {
+                    Ok(()) => {
+                        eprintln!("rz: jetstream consumer ended for '{agent_name}', reconnecting in 2s...");
+                    }
+                    Err(e) => {
+                        eprintln!("rz: jetstream consume error for '{agent_name}': {e}, retrying in 2s...");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+
+            // Fallback: core NATS subscription (also retries on exit)
+            match core_subscribe(&client, agent_name, delivery).await {
+                Ok(()) => {
+                    eprintln!("rz: core subscription ended for '{agent_name}', reconnecting in 2s...");
+                }
                 Err(e) => {
-                    eprintln!("rz: jetstream consume failed, falling back to core: {e}");
+                    eprintln!("rz: core subscribe error for '{agent_name}': {e}, retrying in 2s...");
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-
-        // Fallback: core NATS subscription
-        core_subscribe(&client, agent_name, delivery).await
     })
 }
 
@@ -316,7 +331,7 @@ async fn jetstream_consume(
         }
     }
 
-    bail!("JetStream subscription ended unexpectedly");
+    Ok(()) // Stream ended — caller will reconnect
 }
 
 /// Core NATS subscription — fire-and-forget, no persistence.

@@ -131,17 +131,31 @@ impl TelegramBridge {
                                     continue;
                                 }
                             };
-                            if let Err(e) = nats_client
-                                .publish(
-                                    async_nats::Subject::from(target_subject.clone()),
-                                    wire.into_bytes().into(),
-                                )
-                                .await
-                            {
-                                eprintln!("NATS publish to {target_subject}: {e}");
-                                continue;
+                            // Publish via JetStream so durable consumers receive the message.
+                            // Ensure stream exists, then publish.
+                            let js = async_nats::jetstream::new(nats_client.clone());
+                            let target_agent_name = target_agent.to_string();
+                            let stream_name = format!("RZ_{}", target_agent_name.replace('.', "_").replace('-', "_"));
+                            let _ = js.get_or_create_stream(async_nats::jetstream::stream::Config {
+                                name: stream_name,
+                                subjects: vec![target_subject.clone()],
+                                max_messages: 10_000,
+                                ..Default::default()
+                            }).await;
+                            match js.publish(
+                                async_nats::Subject::from(target_subject.clone()),
+                                wire.into_bytes().into(),
+                            ).await {
+                                Ok(ack_future) => {
+                                    if let Err(e) = ack_future.await {
+                                        eprintln!("NATS jetstream ack failed for {target_subject}: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("NATS publish to {target_subject}: {e}");
+                                    continue;
+                                }
                             }
-                            let _ = nats_client.flush().await;
                             eprintln!("  → {target_subject}: {}", truncate(text, 80));
                         }
                     }

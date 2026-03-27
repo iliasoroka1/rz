@@ -983,8 +983,9 @@ _Fill in the session's primary objective._
         } => {
             if let Some(be) = backend::detect() {
                 // Inside a multiplexer — spawn a pane.
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                let surface_id = be.spawn(&command, &arg_refs, name.as_deref())?;
+                // Split pane WITHOUT command first, so we can type the listener
+                // before the main command starts.
+                let surface_id = be.spawn("", &[], name.as_deref())?;
 
                 if let Some(ref n) = name {
                     save_name(n, &surface_id);
@@ -995,12 +996,32 @@ _Fill in the session's primary objective._
 
                     let prefix = be.backend_name();
                     if rz_cli::nats_hub::hub_url().is_some() {
-                        let rz = rz_path();
+                        // Type the listener command INTO the pane's shell BEFORE
+                        // the main command. It runs as a background job with
+                        // full cmux access since it's a child of the pane's shell.
                         if let Some(ref n) = name {
-                            spawn_nats_listener(&rz, n, &format!("{prefix}:{surface_id}"));
+                            let rz = rz_path();
+                            let listen_cmd = format!(
+                                "{rz} listen {n} --deliver {prefix}:{surface_id} &>/dev/null &",
+                            );
+                            cmux::send(&surface_id, &listen_cmd)?;
+                            // Brief pause to let the background job start
+                            std::thread::sleep(std::time::Duration::from_millis(500));
                         }
+                        // Also start listener for lead (own pane)
+                        let rz = rz_path();
                         spawn_nats_listener(&rz, "lead", &format!("{prefix}:{own}"));
                     }
+                }
+
+                // NOW type the main command into the pane
+                {
+                    let mut full_cmd = cmux::shell_escape_arg(&command);
+                    for arg in &args {
+                        full_cmd.push(' ');
+                        full_cmd.push_str(&cmux::shell_escape_arg(arg));
+                    }
+                    cmux::send(&surface_id, &full_cmd)?;
                 }
 
                 if !no_bootstrap {

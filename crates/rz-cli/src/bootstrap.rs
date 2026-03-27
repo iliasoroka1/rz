@@ -15,7 +15,7 @@ pub fn build(surface_id: &str, name: Option<&str>, backend: &dyn crate::backend:
         peers.push_str(&format!("  - {label}\n"));
     }
 
-    build_common(identity, &peers)
+    build_common(identity, &peers, Some(surface_id))
 }
 
 /// Build bootstrap for a PTY agent (no multiplexer).
@@ -29,11 +29,25 @@ pub fn build_pty(name: &str) -> Result<String> {
         }
     }
 
-    build_common(name, &peers)
+    build_common(name, &peers, None)
 }
 
-fn build_common(identity: &str, peers: &str) -> Result<String> {
+fn build_common(identity: &str, peers: &str, surface_id: Option<&str>) -> Result<String> {
     let peer_list = if peers.is_empty() { "  (none)\n" } else { peers };
+
+    let listener_instruction = if let Some(sid) = surface_id {
+        format!(
+            r#"
+## IMPORTANT: Start your NATS listener
+Run this IMMEDIATELY as your first action using a background bash command (run_in_background=true, timeout=600000):
+```
+rz listen {identity} --deliver cmux:{sid}
+```
+This lets you receive messages from other agents via NATS. Without it, you won't get any @@RZ: messages."#
+        )
+    } else {
+        String::new()
+    };
 
     Ok(format!(
         r#"You are agent "{identity}".
@@ -48,7 +62,7 @@ rz ps                  — list agents
 rz logs <name>         — read agent output
 
 Messages from other agents arrive as @@RZ: JSON in your input.
-
+{listener_instruction}
 ## Rules
 1. Do the task. Report: rz send lead "DONE: <what you did>"
 2. If stuck: rz send lead "BLOCKED: <issue>"

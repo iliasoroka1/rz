@@ -230,7 +230,7 @@ pub fn wait_for_stable_output(surface_id: &str, max_secs: u64, settle_secs: u64)
     std::thread::sleep(settle);
 }
 
-fn shell_escape_arg(s: &str) -> String {
+pub fn shell_escape_arg(s: &str) -> String {
     // Single-quote wrap with internal single-quote escaping
     if s.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '=')) {
         s.to_string()
