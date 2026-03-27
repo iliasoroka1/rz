@@ -13,6 +13,7 @@ pub mod log;
 pub mod mailbox;
 
 pub mod nats_hub;
+pub mod telegram;
 pub mod registry;
 pub mod status;
 pub mod transport;

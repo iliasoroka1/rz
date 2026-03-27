@@ -113,6 +113,22 @@ enum Cmd {
         command: Vec<String>,
     },
 
+    /// Bridge a Telegram chat to NATS — makes a Telegram chat appear as an rz agent.
+    Telegram {
+        /// Telegram Bot API token (or set RZ_TELEGRAM_TOKEN env var).
+        #[arg(long, env = "RZ_TELEGRAM_TOKEN")]
+        token: String,
+        /// Telegram chat ID to bridge.
+        #[arg(long, env = "RZ_TELEGRAM_CHAT_ID")]
+        chat_id: i64,
+        /// Agent name for this bridge.
+        #[arg(long, default_value = "telegram")]
+        name: String,
+        /// Default agent to route messages without @prefix.
+        #[arg(long, default_value = "lead")]
+        default_agent: String,
+    },
+
     /// Bridge an HTTP agent to NATS — lets HTTP services send/receive rz messages.
     ///
     /// Subscribes to NATS for inbound messages and POSTs them to the webhook URL.
@@ -1269,6 +1285,26 @@ _Fill in the session's primary objective._
 
         Cmd::Agent { name, no_bootstrap, permanent, command } => {
             rz_cli::pty::run_agent(&name, &command, no_bootstrap, permanent)?;
+        }
+
+        Cmd::Telegram { token, chat_id, name, default_agent } => {
+            let rt = tokio::runtime::Runtime::new()
+                .wrap_err("tokio runtime")?;
+            rt.block_on(async {
+                let hub_url = rz_cli::nats_hub::hub_url()
+                    .ok_or_else(|| eyre::eyre!("RZ_HUB must be set for Telegram bridge"))?;
+                let client = async_nats::connect(&hub_url).await
+                    .wrap_err("NATS connect")?;
+                let js = async_nats::jetstream::new(client.clone());
+                let kv = js.create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: "rz-agents".into(),
+                    ..Default::default()
+                }).await.ok();
+                let bridge = rz_cli::telegram::TelegramBridge::new(
+                    token, chat_id, name, default_agent,
+                );
+                bridge.run(&client, kv.as_ref()).await
+            })?;
         }
 
         Cmd::Bridge { name, webhook, port, permanent } => {

@@ -59,6 +59,24 @@ pub fn format_message(envelope: &Envelope, own_id: Option<&str>) -> String {
         MessageKind::Timer { label } => {
             return format!("[{h:02}:{m:02}:{s:02}] {}{me}> timer: {label}", envelope.from);
         }
+        MessageKind::Status { state, detail } => {
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> [{state}] {detail}", envelope.from);
+        }
+        MessageKind::ToolCall { name, .. } => {
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> (calling tool: {name})", envelope.from);
+        }
+        MessageKind::ToolResult { name, result, is_error } => {
+            let prefix = if *is_error { "tool error" } else { "tool result" };
+            let short = if result.len() > 200 { &result[..200] } else { result.as_str() };
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> {prefix} ({name}): {short}", envelope.from);
+        }
+        MessageKind::Delegate { task, .. } => {
+            let short = if task.len() > 200 { &task[..200] } else { task.as_str() };
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> (delegating: {short})", envelope.from);
+        }
+        MessageKind::Hello { name } => {
+            return format!("[{h:02}:{m:02}:{s:02}] {}{me}> hello from {name}", envelope.from);
+        }
     };
 
     format!("[{h:02}:{m:02}:{s:02}] {}{me}> {text}", envelope.from)

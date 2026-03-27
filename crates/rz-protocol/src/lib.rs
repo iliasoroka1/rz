@@ -32,11 +32,20 @@ pub enum MessageKind {
     Pong,
     Error { message: String },
     Timer { label: String },
+    Status { state: String, detail: String },
+    ToolCall { name: String, input: String },
+    ToolResult { name: String, result: String, is_error: bool },
+    Delegate { task: String, to: Option<String> },
+    Hello { name: String },
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 impl Envelope {
+    pub fn chat(from: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::new(from, MessageKind::Chat { text: text.into() })
+    }
+
     pub fn new(from: impl Into<String>, kind: MessageKind) -> Self {
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let ts = std::time::SystemTime::now()
