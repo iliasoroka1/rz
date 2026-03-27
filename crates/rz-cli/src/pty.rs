@@ -53,7 +53,7 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
 }
 
 /// Run a command as a named rz agent with PTY wrapping.
-pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<()> {
+pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: bool) -> Result<()> {
     // Phase 1: Create PTY
     let pty = openpty(None, None).wrap_err("failed to open PTY")?;
     let master_raw: RawFd = pty.master.as_raw_fd();
@@ -71,6 +71,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
         transport: "nats".to_string(),
         endpoint: name.to_string(),
         capabilities: vec![],
+        permanent,
         registered_at: now_ms,
         last_seen: now_ms,
     };
@@ -369,8 +370,10 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool) -> Result<(
 
     // Phase 8: Cleanup
     drop(_raw_guard);
-    let _ = crate::registry::deregister(name);
-    let _ = crate::registry::nats_deregister(name);
+    if !permanent {
+        let _ = crate::registry::deregister(name);
+        let _ = crate::registry::nats_deregister(name);
+    }
 
     use nix::sys::wait::waitpid;
     let _ = waitpid(child_pid, None);

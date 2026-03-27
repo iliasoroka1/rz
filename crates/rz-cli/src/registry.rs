@@ -16,18 +16,24 @@ pub struct AgentEntry {
     pub name: String,
     /// UUID or cmux surface ID.
     pub id: String,
-    /// One of: `cmux`, `http`, `file`, `stdio`.
+    /// One of: `cmux`, `http`, `file`, `nats`.
     pub transport: String,
-    /// Surface ID for cmux, URL for http, mailbox path for file.
+    /// Surface ID for cmux, URL for http, agent name for nats.
     pub endpoint: String,
     /// Optional tags like `["code","review","search"]`.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// If true, entry persists in registry after agent exits.
+    #[serde(default)]
+    pub permanent: bool,
     /// Unix epoch milliseconds when the agent first registered.
     pub registered_at: u64,
-    /// Unix epoch milliseconds, updated by [`touch`].
+    /// Unix epoch milliseconds, updated by heartbeat.
     pub last_seen: u64,
 }
+
+/// Max inactivity before a non-permanent agent is pruned (10 minutes).
+const STALE_THRESHOLD_MS: u64 = 10 * 60 * 1000;
 
 /// Return the path to the registry file (`~/.rz/registry.json`).
 pub fn registry_path() -> PathBuf {
@@ -142,7 +148,7 @@ async fn nats_kv_store(
             let store = js
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: NATS_KV_BUCKET.to_string(),
-                    max_age: std::time::Duration::from_secs(300), // 5 min TTL
+                    max_age: std::time::Duration::ZERO, // no auto-expiry — managed by heartbeat + pruning
                     ..Default::default()
                 })
                 .await
@@ -230,7 +236,13 @@ pub fn nats_list() -> Result<Vec<AgentEntry>> {
             Err(_) => return Ok(Vec::new()),
         };
 
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let mut entries = Vec::new();
+        let mut to_prune = Vec::new();
         while let Some(key) = keys.next().await {
             let key = match key {
                 Ok(k) => k,
@@ -240,9 +252,18 @@ pub fn nats_list() -> Result<Vec<AgentEntry>> {
                 if let Ok(agent) =
                     serde_json::from_slice::<AgentEntry>(&kv_entry)
                 {
+                    // Prune stale non-permanent agents.
+                    if !agent.permanent && now_ms.saturating_sub(agent.last_seen) > STALE_THRESHOLD_MS {
+                        to_prune.push(agent.name.clone());
+                        continue;
+                    }
                     entries.push(agent);
                 }
             }
+        }
+        // Clean up stale entries.
+        for name in &to_prune {
+            let _ = store.delete(name).await;
         }
         Ok(entries)
     })
@@ -272,6 +293,17 @@ pub fn nats_lookup(name: &str) -> Result<Option<AgentEntry>> {
             Ok(Some(value)) => {
                 let agent = serde_json::from_slice::<AgentEntry>(&value)
                     .map_err(|e| eyre::eyre!("NATS KV deserialize failed: {e}"))?;
+                // Prune stale non-permanent agents.
+                if !agent.permanent {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if now_ms.saturating_sub(agent.last_seen) > STALE_THRESHOLD_MS {
+                        let _ = store.delete(name).await;
+                        return Ok(None);
+                    }
+                }
                 Ok(Some(agent))
             }
             Ok(None) | Err(_) => Ok(None),
@@ -279,14 +311,19 @@ pub fn nats_lookup(name: &str) -> Result<Option<AgentEntry>> {
     })
 }
 
-/// Re-put an agent entry to refresh its TTL in the NATS KV bucket.
+/// Re-put an agent entry with updated `last_seen` to keep it alive.
 /// If `RZ_HUB` is not set, returns `Ok(())` silently.
 pub fn nats_heartbeat(name: &str, entry: &AgentEntry) -> Result<()> {
     let url = match crate::nats_hub::hub_url() {
         Some(u) => u,
         None => return Ok(()),
     };
-    let json = serde_json::to_string(entry)?;
+    let mut refreshed = entry.clone();
+    refreshed.last_seen = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let json = serde_json::to_string(&refreshed)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

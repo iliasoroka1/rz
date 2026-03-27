@@ -460,6 +460,9 @@ enum Cmd {
         /// Skip bootstrap instructions.
         #[arg(long)]
         no_bootstrap: bool,
+        /// Keep registry entry after exit (for long-running server agents).
+        #[arg(long)]
+        permanent: bool,
         /// Command and arguments to run (after --).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
@@ -1214,6 +1217,7 @@ _Fill in the session's primary objective._
                 transport,
                 endpoint: ep,
                 capabilities,
+                permanent: false,
                 registered_at: now,
                 last_seen: now,
             };
@@ -1253,8 +1257,8 @@ _Fill in the session's primary objective._
             }
         }
 
-        Cmd::Agent { name, no_bootstrap, command } => {
-            rz_cli::pty::run_agent(&name, &command, no_bootstrap)?;
+        Cmd::Agent { name, no_bootstrap, permanent, command } => {
+            rz_cli::pty::run_agent(&name, &command, no_bootstrap, permanent)?;
         }
     }
 
