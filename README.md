@@ -143,7 +143,7 @@ Temporary agents are pruned after 10 minutes of inactivity. Permanent agents (`-
 | PTY agent | `rz agent --name X -- <cmd>` | Any terminal, SSH, CI, servers |
 | HTTP bridge | `rz bridge --name X --webhook <url>` | HTTP APIs, web services |
 | tmux | `rz run --name X <cmd>` | tmux users |
-| cmux | `rz run --name X <cmd>` | Claude Code desktop app |
+| cmux | `rz run --name X <cmd>` | [cmux](https://cmux.dev) terminal (macOS) |
 | zellij | `rz run --name X <cmd>` | Zellij users |
 
 `rz run` auto-detects the multiplexer. Without one, it falls back to a headless PTY agent.
