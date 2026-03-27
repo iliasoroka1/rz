@@ -39,77 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    // ── Core commands ──────────────────────────────────────────
-
-    /// Run a command as a named rz agent with PTY wrapping.
-    ///
-    /// No terminal multiplexer needed. Creates a pseudo-terminal,
-    /// subscribes to NATS for incoming messages, and injects them
-    /// as @@RZ: lines into the child process.
-    ///
-    /// Examples:
-    ///   rz agent --name worker -- claude --dangerously-skip-permissions
-    ///   rz agent --name lead -- claude --dangerously-skip-permissions
-    Agent {
-        /// Agent name (used for NATS subject, registry, routing).
-        #[arg(long)]
-        name: String,
-        /// Skip bootstrap instructions.
-        #[arg(long)]
-        no_bootstrap: bool,
-        /// Keep registry entry after exit (for long-running server agents).
-        #[arg(long)]
-        permanent: bool,
-        /// Command and arguments to run (after --).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
-        command: Vec<String>,
-    },
-
-    /// Send a message to an agent.
-    ///
-    /// Examples:
-    ///   rz send worker "do this task"
-    ///   rz send lead "DONE: finished the task"
-    Send {
-        /// Target agent name or ID.
-        pane: String,
-        /// Message text.
-        message: String,
-        /// Send plain text instead of @@RZ: envelope.
-        #[arg(long)]
-        raw: bool,
-        /// Override sender identity.
-        #[arg(long)]
-        from: Option<String>,
-        /// Reference a previous message ID (for threading).
-        #[arg(long)]
-        r#ref: Option<String>,
-        /// Block until a reply arrives (timeout in seconds).
-        #[arg(long)]
-        wait: Option<u64>,
-    },
-
-    /// List all agents (local panes + registry + NATS KV).
-    ///
-    /// Alias: `rz ps`
-    #[command(alias = "ps")]
-    List,
-
-    // ── Other commands ──────────────────────────────────────────
-
-    #[command(hide = true)]
-    /// Print this agent's ID.
-    Id,
-
-    #[command(hide = true)]
-    /// Initialize a shared workspace for this session.
-    Init,
-
-    #[command(hide = true)]
-    /// Print the session workspace path.
-    Dir,
-
-    /// Spawn an agent in a new pane (or headless PTY if no multiplexer).
+    /// Spawn an agent (auto-detects tmux/cmux/zellij, or headless PTY).
     ///
     /// Auto-detects tmux/cmux/zellij. Without a multiplexer, falls back
     /// to a background PTY agent (requires --name and RZ_HUB).
@@ -137,6 +67,67 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Send a message to an agent.
+    ///
+    /// Examples:
+    ///   rz send worker "do this task"
+    ///   rz send lead "DONE: finished the task"
+    Send {
+        /// Target agent name or ID.
+        pane: String,
+        /// Message text.
+        message: String,
+        /// Send plain text instead of @@RZ: envelope.
+        #[arg(long)]
+        raw: bool,
+        /// Override sender identity.
+        #[arg(long)]
+        from: Option<String>,
+        /// Reference a previous message ID (for threading).
+        #[arg(long)]
+        r#ref: Option<String>,
+        /// Block until a reply arrives (timeout in seconds).
+        #[arg(long)]
+        wait: Option<u64>,
+    },
+
+    /// List all agents (local panes + registry + NATS KV).
+    #[command(alias = "ps")]
+    List,
+
+    /// Run a command as a named rz agent with PTY wrapping (no multiplexer needed).
+    ///
+    /// Examples:
+    ///   rz agent --name worker -- claude --dangerously-skip-permissions
+    Agent {
+        /// Agent name (used for NATS subject, registry, routing).
+        #[arg(long)]
+        name: String,
+        /// Skip bootstrap instructions.
+        #[arg(long)]
+        no_bootstrap: bool,
+        /// Keep registry entry after exit (for long-running server agents).
+        #[arg(long)]
+        permanent: bool,
+        /// Command and arguments to run (after --).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+
+    // ── Less common commands (hidden from default help) ────────
+
+    #[command(hide = true)]
+    /// Print this agent's ID.
+    Id,
+
+    #[command(hide = true)]
+    /// Initialize a shared workspace.
+    Init,
+
+    #[command(hide = true)]
+    /// Print workspace path.
+    Dir,
 
     #[command(hide = true)]
     /// Send a message and block until the agent replies.
