@@ -43,12 +43,73 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    // ── Core commands ──────────────────────────────────────────
+
+    /// Run a command as a named rz agent with PTY wrapping.
+    ///
+    /// No terminal multiplexer needed. Creates a pseudo-terminal,
+    /// subscribes to NATS for incoming messages, and injects them
+    /// as @@RZ: lines into the child process.
+    ///
+    /// Examples:
+    ///   rz agent --name worker -- claude --dangerously-skip-permissions
+    ///   rz agent --name lead -- claude --dangerously-skip-permissions
+    Agent {
+        /// Agent name (used for NATS subject, registry, routing).
+        #[arg(long)]
+        name: String,
+        /// Skip bootstrap instructions.
+        #[arg(long)]
+        no_bootstrap: bool,
+        /// Keep registry entry after exit (for long-running server agents).
+        #[arg(long)]
+        permanent: bool,
+        /// Command and arguments to run (after --).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Send a message to an agent.
+    ///
+    /// Examples:
+    ///   rz send worker "do this task"
+    ///   rz send lead "DONE: finished the task"
+    Send {
+        /// Target agent name or ID.
+        pane: String,
+        /// Message text.
+        message: String,
+        /// Send plain text instead of @@RZ: envelope.
+        #[arg(long)]
+        raw: bool,
+        /// Override sender identity.
+        #[arg(long)]
+        from: Option<String>,
+        /// Reference a previous message ID (for threading).
+        #[arg(long)]
+        r#ref: Option<String>,
+        /// Block until a reply arrives (timeout in seconds).
+        #[arg(long)]
+        wait: Option<u64>,
+    },
+
+    /// List all agents (local panes + registry + NATS KV).
+    ///
+    /// Alias: `rz ps`
+    #[command(alias = "ps")]
+    List,
+
+    // ── Other commands ──────────────────────────────────────────
+
+    #[command(hide = true)]
     /// Print this agent's ID.
     Id,
 
+    #[command(hide = true)]
     /// Initialize a shared workspace for this session.
     Init,
 
+    #[command(hide = true)]
     /// Print the session workspace path.
     Dir,
 
@@ -81,30 +142,7 @@ enum Cmd {
         args: Vec<String>,
     },
 
-    /// Send a message to an agent.
-    ///
-    /// Examples:
-    ///   rz send worker "do this task"
-    ///   rz send lead "DONE: finished the task"
-    Send {
-        /// Target agent name or ID.
-        pane: String,
-        /// Message text.
-        message: String,
-        /// Send plain text instead of @@RZ: envelope.
-        #[arg(long)]
-        raw: bool,
-        /// Override sender identity.
-        #[arg(long)]
-        from: Option<String>,
-        /// Reference a previous message ID (for threading).
-        #[arg(long)]
-        r#ref: Option<String>,
-        /// Block until a reply arrives (timeout in seconds).
-        #[arg(long)]
-        wait: Option<u64>,
-    },
-
+    #[command(hide = true)]
     /// Send a message and block until the agent replies.
     ///
     /// Shorthand for `rz send --wait 60 <name> "message"`.
@@ -121,6 +159,7 @@ enum Cmd {
         timeout: u64,
     },
 
+    #[command(hide = true)]
     /// Collect the last @@RZ: message from each listed agent (MPI-style gather).
     ///
     /// Reads the scrollback of every surface ID given and prints the most
@@ -140,6 +179,7 @@ enum Cmd {
         last: usize,
     },
 
+    #[command(hide = true)]
     /// Set progress indicator (0.0–1.0). [cmux only]
     ///
     /// Examples:
@@ -152,6 +192,7 @@ enum Cmd {
         label: Option<String>,
     },
 
+    #[command(hide = true)]
     /// Set a status key/value. [cmux only]
     ///
     /// Examples:
@@ -171,6 +212,7 @@ enum Cmd {
         color: Option<String>,
     },
 
+    #[command(hide = true)]
     /// Clear a status key. [cmux only]
     ///
     /// Examples:
@@ -181,6 +223,7 @@ enum Cmd {
         key: String,
     },
 
+    #[command(hide = true)]
     /// Fire a named signal.
     ///
     /// Examples:
@@ -190,6 +233,7 @@ enum Cmd {
         name: String,
     },
 
+    #[command(hide = true)]
     /// Block until a named signal fires.
     ///
     /// Examples:
@@ -213,13 +257,8 @@ enum Cmd {
         raw: bool,
     },
 
-    /// List all agents (local panes + registry + NATS KV).
-    ///
-    /// Alias: `rz ps` (docker-style)
-    #[command(alias = "ps")]
-    List,
-
-    /// Show a summary of the session: surface counts and per-surface status.
+    /// Show a summary of the session.
+    #[command(hide = true)]
     ///
     /// Includes message counts from each surface's scrollback.
     Status,
@@ -300,6 +339,7 @@ enum Cmd {
         label: String,
     },
 
+    #[command(hide = true)]
     /// Browser automation. [cmux only].
     ///
     /// All arguments are forwarded directly to the cmux browser CLI.
@@ -322,6 +362,7 @@ enum Cmd {
         args: Vec<String>,
     },
 
+    #[command(hide = true)]
     /// Send a notification to the user.
     ///
     /// Creates a cmux notification that appears in the sidebar and
@@ -342,6 +383,7 @@ enum Cmd {
         surface: Option<String>,
     },
 
+    #[command(hide = true)]
     /// Workspace management commands.
     ///
     /// Examples:
@@ -352,11 +394,13 @@ enum Cmd {
         action: WorkspaceCmd,
     },
 
+    #[command(hide = true)]
     /// Show full system tree. [cmux only].
     ///
     /// Displays the hierarchical structure of the cmux session.
     Tree,
 
+    #[command(hide = true)]
     /// Register this agent in the universal registry.
     ///
     /// Makes this agent discoverable by other agents via `rz ps`.
@@ -381,12 +425,14 @@ enum Cmd {
         caps: Option<String>,
     },
 
+    #[command(hide = true)]
     /// Remove an agent from the registry.
     Deregister {
         /// Agent name to remove.
         name: String,
     },
 
+    #[command(hide = true)]
     /// Listen for messages on a NATS subject for a named agent.
     ///
     /// Subscribes to the agent's NATS subject and delivers incoming
@@ -406,6 +452,7 @@ enum Cmd {
         deliver: String,
     },
 
+    #[command(hide = true)]
     /// Receive pending messages from file mailbox.
     ///
     /// Reads and removes messages from ~/.rz/mailboxes/<name>/inbox/.
@@ -426,29 +473,6 @@ enum Cmd {
         count: bool,
     },
 
-    /// Run a command as a named rz agent with PTY wrapping.
-    ///
-    /// No terminal multiplexer needed. Creates a pseudo-terminal,
-    /// subscribes to NATS for incoming messages, and injects them
-    /// as @@RZ: lines into the child process.
-    ///
-    /// Examples:
-    ///   rz agent --name worker -- claude --dangerously-skip-permissions
-    ///   rz agent --name lead -- claude --dangerously-skip-permissions
-    Agent {
-        /// Agent name (used for NATS subject, registry, routing).
-        #[arg(long)]
-        name: String,
-        /// Skip bootstrap instructions.
-        #[arg(long)]
-        no_bootstrap: bool,
-        /// Keep registry entry after exit (for long-running server agents).
-        #[arg(long)]
-        permanent: bool,
-        /// Command and arguments to run (after --).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
-        command: Vec<String>,
-    },
 }
 
 /// Path to the name→UUID registry file.
