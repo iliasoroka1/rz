@@ -4,10 +4,11 @@
 
 Works with any AI coding agent — [Claude Code](https://claude.ai/code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), or any process that reads terminal input. No SDK, no framework — just a CLI tool that injects messages into terminals.
 
-Three ways to run:
-- **`rz run`** — inside [tmux](https://github.com/tmux/tmux), [cmux](https://cmux.dev), or [zellij](https://zellij.dev) (spawns panes, auto-detects)
-- **`rz agent`** — in any plain terminal (PTY wrapping, no multiplexer needed)
-- **NATS** — bridge agents across machines, multiplexers, or both
+Two commands to run agents:
+- **`rz agent --name X -- <cmd>`** — wraps any command in a PTY, works in any terminal
+- **`rz run --name X <cmd>`** — spawns a pane in [tmux](https://github.com/tmux/tmux), [cmux](https://cmux.dev), or [zellij](https://zellij.dev) (auto-detects), or falls back to headless PTY
+
+Connect agents across machines with [NATS](https://nats.io) (`export RZ_HUB=nats://...`).
 
 **Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg).
 
