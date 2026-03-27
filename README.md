@@ -138,15 +138,11 @@ Temporary agents are pruned after 10 minutes of inactivity. Permanent agents (`-
 
 ## Backends
 
-| Backend | Command | Best for |
+| Command | What it does | Best for |
 |---|---|---|
-| PTY agent | `rz agent --name X -- <cmd>` | Any terminal, SSH, CI, servers |
-| HTTP bridge | `rz bridge --name X --webhook <url>` | HTTP APIs, web services |
-| tmux | `rz run --name X <cmd>` | tmux users |
-| cmux | `rz run --name X <cmd>` | [cmux](https://cmux.dev) terminal (macOS) |
-| zellij | `rz run --name X <cmd>` | Zellij users |
-
-`rz run` auto-detects the multiplexer. Without one, it falls back to a headless PTY agent.
+| `rz run --name X <cmd>` | Spawn agent in a pane (tmux/cmux/zellij) or headless PTY | Terminal agents |
+| `rz agent --name X -- <cmd>` | Wrap a command in a PTY with NATS messaging | Any terminal, SSH, CI |
+| `rz bridge --name X --webhook <url>` | Proxy between NATS and an HTTP service | Existing APIs, web services |
 
 ---
 
