@@ -23,15 +23,13 @@ enum WorkspaceCmd {
 }
 
 /// Universal messaging for AI agents — works in any terminal.
-///
-/// Quick start:
-///   rz run --name worker claude --dangerously-skip-permissions
-///   rz send worker "do something"
-///   rz ps
-///
-/// Use `rz help <command>` for details. `rz help --all` shows all commands.
 #[derive(Parser)]
-#[command(name = "rz", version, about, long_about)]
+#[command(
+    name = "rz",
+    version,
+    about,
+    after_help = "Quick start:\n  rz run --name worker claude --dangerously-skip-permissions\n  rz send worker \"do something\"\n  rz ps\n\nUse `rz help <command>` for details. `rz help --all` shows all commands."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
