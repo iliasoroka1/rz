@@ -113,6 +113,29 @@ enum Cmd {
         command: Vec<String>,
     },
 
+    /// Bridge an HTTP agent to NATS — lets HTTP services send/receive rz messages.
+    ///
+    /// Subscribes to NATS for inbound messages and POSTs them to the webhook URL.
+    /// Exposes a local HTTP endpoint for the agent to send messages back.
+    ///
+    /// Examples:
+    ///   rz bridge --name api-bot --webhook http://localhost:7070/inbox
+    ///   rz bridge --name api-bot --webhook http://localhost:7070/inbox --port 7071
+    Bridge {
+        /// Agent name (used for NATS subject and registry).
+        #[arg(long)]
+        name: String,
+        /// URL to POST incoming messages to (the HTTP agent's inbox).
+        #[arg(long)]
+        webhook: String,
+        /// Port for the bridge's outbound HTTP server (default 7071).
+        #[arg(long, default_value = "7071")]
+        port: u16,
+        /// Keep registry entry after exit.
+        #[arg(long)]
+        permanent: bool,
+    },
+
     // ── Less common commands (hidden from default help) ────────
 
     #[command(hide = true)]
@@ -1246,6 +1269,10 @@ _Fill in the session's primary objective._
 
         Cmd::Agent { name, no_bootstrap, permanent, command } => {
             rz_cli::pty::run_agent(&name, &command, no_bootstrap, permanent)?;
+        }
+
+        Cmd::Bridge { name, webhook, port, permanent } => {
+            rz_cli::bridge::run_bridge(&name, &webhook, port, permanent)?;
         }
     }
 
