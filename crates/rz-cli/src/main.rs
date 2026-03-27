@@ -22,18 +22,18 @@ enum WorkspaceCmd {
     List,
 }
 
-/// Agent-to-agent messaging over cmux surfaces.
+/// Universal messaging for AI agents — works in any terminal.
 ///
-/// Uses cmux's socket API for direct, targeted communication between processes
-/// running in cmux surfaces. No files, no focus switching — just surface IDs.
+/// Quick start (any terminal):
+///   rz agent --name worker -- claude     # run agent with PTY wrapping
+///   rz send worker "do something"        # send it a message
+///   rz list                              # see all agents
 ///
-/// Quick start:
-///   rz run claude                       # start an agent (alias: spawn)
-///   rz send <surface_id> "do something" # send it a message
-///   rz ps                               # see all running surfaces (alias: list)
-///   rz logs <surface_id>                # read what it's been doing (alias: dump)
-///   rz kill <surface_id>                # close a surface (alias: close)
-///   rz broadcast "status update"        # message all agents
+/// With a multiplexer (tmux/cmux/zellij):
+///   rz run --name worker claude          # spawn agent in a pane
+///
+/// Cross-machine (set RZ_HUB=nats://...):
+///   rz send remote-worker "do something" # routes through NATS
 #[derive(Parser)]
 #[command(name = "rz", version, about, long_about)]
 struct Cli {
@@ -43,33 +43,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print this surface's ID.
+    /// Print this agent's ID.
     Id,
 
     /// Initialize a shared workspace for this session.
-    ///
-    /// Creates a directory at /tmp/rz-cmux-<workspace_id>/ with a shared/ folder
-    /// and prints the path. Agents can write files there instead of
-    /// sending large messages. Idempotent — safe to call multiple times.
     Init,
 
     /// Print the session workspace path.
-    ///
-    /// Fails if `rz init` hasn't been run yet.
     Dir,
 
-    /// Spawn an agent in a new surface with communication instructions.
+    /// Spawn an agent in a new pane (or headless PTY if no multiplexer).
     ///
-    /// Creates a new cmux surface, waits for it to start, then sends
-    /// bootstrap instructions (identity, rz usage, active peers).
-    ///
-    /// Alias: `rz run` (docker-style)
+    /// Auto-detects tmux/cmux/zellij. Without a multiplexer, falls back
+    /// to a background PTY agent (requires --name and RZ_HUB).
     ///
     /// Examples:
-    ///   rz spawn claude
-    ///   rz run claude                        # same thing
-    ///   rz spawn --name researcher -p "find all TODOs" claude
-    ///   rz spawn --no-bootstrap python agent.py
+    ///   rz run --name worker claude --dangerously-skip-permissions
+    ///   rz run --name coder -p "implement auth" claude --dangerously-skip-permissions
     #[command(alias = "run")]
     Spawn {
         /// Command to run.
@@ -91,7 +81,7 @@ enum Cmd {
         args: Vec<String>,
     },
 
-    /// Send a message to a surface.
+    /// Send a message to an agent.
     ///
     /// By default wraps the message in an @@RZ: protocol envelope with
     /// sender ID and timestamp. Use --raw for plain text.
@@ -102,7 +92,7 @@ enum Cmd {
     ///   rz send --ref abc123 <surface_id> "replying to your message"
     ///   rz send --wait 30 <surface_id> "do this and reply"
     Send {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
         /// Message text.
         message: String,
@@ -130,7 +120,7 @@ enum Cmd {
     ///   rz ask <surface_id> "what is the status?"
     ///   rz ask <surface_id> "are you done?" --timeout 120
     Ask {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
         /// Message text.
         message: String,
@@ -158,7 +148,7 @@ enum Cmd {
         last: usize,
     },
 
-    /// Set progress indicator for this surface (0.0–1.0).
+    /// Set progress indicator (0.0–1.0). [cmux only]
     ///
     /// Examples:
     ///   rz progress 0.5
@@ -170,7 +160,7 @@ enum Cmd {
         label: Option<String>,
     },
 
-    /// Set a status key/value for this surface.
+    /// Set a status key/value. [cmux only]
     ///
     /// Examples:
     ///   rz status-set build done
@@ -189,7 +179,7 @@ enum Cmd {
         color: Option<String>,
     },
 
-    /// Clear a status key for this surface.
+    /// Clear a status key. [cmux only]
     ///
     /// Examples:
     ///   rz status-clear build
@@ -222,7 +212,7 @@ enum Cmd {
         timeout: Option<u64>,
     },
 
-    /// Broadcast a message to all other terminal surfaces.
+    /// Broadcast a message to all other agents.
     Broadcast {
         /// Message text.
         message: String,
@@ -231,7 +221,7 @@ enum Cmd {
         raw: bool,
     },
 
-    /// List all surfaces with their info and status.
+    /// List all agents (local panes + registry + NATS KV).
     ///
     /// Alias: `rz ps` (docker-style)
     #[command(alias = "ps")]
@@ -242,7 +232,7 @@ enum Cmd {
     /// Includes message counts from each surface's scrollback.
     Status,
 
-    /// Dump a surface's scrollback to stdout.
+    /// Dump an agent's scrollback to stdout.
     ///
     /// Alias: `rz logs` (docker-style)
     ///
@@ -251,14 +241,14 @@ enum Cmd {
     ///   rz logs <surface_id> --last 50    # last 50 lines only
     #[command(alias = "logs")]
     Dump {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
         /// Only show the last N lines.
         #[arg(long)]
         last: Option<usize>,
     },
 
-    /// Show @@RZ: protocol messages from a surface's scrollback.
+    /// Show @@RZ: protocol messages from an agent's scrollback.
     ///
     /// Extracts and formats all protocol envelopes, filtering out
     /// normal shell output.
@@ -267,23 +257,23 @@ enum Cmd {
     ///   rz log <surface_id>
     ///   rz log <surface_id> --last 10
     Log {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
         /// Only show the last N messages.
         #[arg(long)]
         last: Option<usize>,
     },
 
-    /// Close a surface.
+    /// Close an agent's pane.
     ///
     /// Alias: `rz kill` (docker-style)
     #[command(alias = "kill")]
     Close {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
     },
 
-    /// Ping a surface and measure round-trip time.
+    /// Ping an agent and measure round-trip time.
     ///
     /// Sends a Ping envelope and waits for a Pong reply (up to --timeout
     /// seconds). Useful for checking if an agent is alive and responsive.
@@ -295,7 +285,7 @@ enum Cmd {
     ///   rz ping <surface_id>
     ///   rz ping <surface_id> --timeout 120
     Ping {
-        /// Target surface ID.
+        /// Target agent name or ID.
         pane: String,
         /// Seconds to wait for a Pong reply.
         #[arg(long, default_value = "60")]
@@ -318,7 +308,7 @@ enum Cmd {
         label: String,
     },
 
-    /// Browser automation — full passthrough to `cmux browser`.
+    /// Browser automation. [cmux only].
     ///
     /// All arguments are forwarded directly to the cmux browser CLI.
     /// Run `cmux browser help` to see all available subcommands.
@@ -370,7 +360,7 @@ enum Cmd {
         action: WorkspaceCmd,
     },
 
-    /// Show full system tree (windows, workspaces, surfaces).
+    /// Show full system tree. [cmux only].
     ///
     /// Displays the hierarchical structure of the cmux session.
     Tree,
