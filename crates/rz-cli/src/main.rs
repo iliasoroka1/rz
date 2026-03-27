@@ -22,6 +22,29 @@ enum WorkspaceCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum KvCmd {
+    /// Get a value from a KV bucket.
+    Get {
+        /// Bucket name (e.g. rz-issues, rz-agents).
+        bucket: String,
+        /// Key to look up.
+        key: String,
+    },
+    /// List all keys in a KV bucket.
+    List {
+        /// Bucket name.
+        bucket: String,
+    },
+    /// Watch a KV bucket for changes (live stream).
+    Watch {
+        /// Bucket name.
+        bucket: String,
+        /// Optional key to watch (watches all keys if omitted).
+        key: Option<String>,
+    },
+}
+
 /// Universal messaging for AI agents — works in any terminal.
 #[derive(Parser)]
 #[command(
@@ -493,6 +516,113 @@ enum Cmd {
         count: bool,
     },
 
+    /// Delegate a task to another agent (creates an issue via Interstellar bridge).
+    ///
+    /// Examples:
+    ///   rz delegate worker "implement auth module"
+    ///   rz delegate worker "fix login bug" --description "Users report 500 on /login"
+    Delegate {
+        /// Target agent name.
+        target: String,
+        /// Task title/description.
+        task: String,
+        /// Optional detailed description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// Claim an issue for yourself.
+    ///
+    /// Examples:
+    ///   rz claim ISSUE-123
+    Claim {
+        /// Issue ID to claim.
+        issue_id: String,
+    },
+
+    /// Release a claimed issue back to the backlog.
+    ///
+    /// Examples:
+    ///   rz release ISSUE-123
+    ///   rz release ISSUE-123 --reason "need more context"
+    Release {
+        /// Issue ID to release.
+        issue_id: String,
+        /// Reason for releasing.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Mark an issue as complete.
+    ///
+    /// Examples:
+    ///   rz complete ISSUE-123
+    ///   rz complete ISSUE-123 --summary "Added auth middleware and tests"
+    Complete {
+        /// Issue ID completed.
+        issue_id: String,
+        /// Summary of what was done.
+        #[arg(long)]
+        summary: Option<String>,
+    },
+
+    /// Report an issue as blocked.
+    ///
+    /// Examples:
+    ///   rz block ISSUE-123 --reason "waiting on API keys"
+    Block {
+        /// Issue ID that is blocked.
+        issue_id: String,
+        /// What is blocking progress.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Hand off an issue to another agent with context.
+    ///
+    /// Examples:
+    ///   rz handoff worker ISSUE-123 --summary "Auth logic done, needs frontend"
+    Handoff {
+        /// Target agent to hand off to.
+        target: String,
+        /// Issue ID to hand off.
+        issue_id: String,
+        /// Context/summary for the receiving agent.
+        #[arg(long)]
+        summary: Option<String>,
+    },
+
+    /// Emit a structured envelope with any custom kind. The universal primitive.
+    ///
+    /// The receiver decides what to do with it. Interstellar's bridge reacts
+    /// to known kinds (delegate, claim, etc). Any system can define its own.
+    ///
+    /// Body can be JSON or key=value pairs (auto-converted to JSON object).
+    ///
+    /// Examples:
+    ///   rz emit worker delegate '{"title":"Fix the bug"}'
+    ///   rz emit self claim issueId=IST-42
+    ///   rz emit ark knowledge.search query="auth tokens" limit=5
+    ///   rz emit monitor alert level=critical message="disk full"
+    Emit {
+        /// Target agent name (use "self" to address yourself).
+        target: String,
+        /// Message kind (e.g. delegate, claim, alert, knowledge.search).
+        kind: String,
+        /// Body as JSON string or key=value pairs.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        body: Vec<String>,
+    },
+
+    /// Read from NATS KV buckets (requires RZ_HUB).
+    ///
+    /// Examples:
+    ///   rz kv get rz-issues IST-42
+    ///   rz kv list rz-issues
+    ///   rz kv watch rz-issues
+    #[command(subcommand)]
+    Kv(KvCmd),
+
 }
 
 /// Path to the name→UUID registry file.
@@ -718,6 +848,59 @@ fn wait_for_reply(msg_id: &str, timeout_secs: u64) -> Result<()> {
             return Ok(());
         }
     }
+}
+
+/// Get the sender name from RZ_AGENT_NAME or fall back to sender_id().
+fn sender_name() -> String {
+    std::env::var("RZ_AGENT_NAME").unwrap_or_else(|_| sender_id(None))
+}
+
+/// Parse key=value pairs into a JSON object.
+/// Values that look like numbers become numbers, "true"/"false" become bools.
+fn parse_kv_body(args: &[String]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for arg in args {
+        if let Some((key, val)) = arg.split_once('=') {
+            let json_val = if val == "true" {
+                serde_json::Value::Bool(true)
+            } else if val == "false" {
+                serde_json::Value::Bool(false)
+            } else if let Ok(n) = val.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else if let Ok(f) = val.parse::<f64>() {
+                serde_json::json!(f)
+            } else {
+                serde_json::Value::String(val.to_string())
+            };
+            map.insert(key.to_string(), json_val);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Publish a structured envelope with a custom kind/body as raw JSON.
+///
+/// Builds the full `@@RZ:{...}` wire format manually so we can use
+/// arbitrary kind names that may not exist in the MessageKind enum.
+fn publish_structured(target_name: &str, from: &str, kind_name: &str, body: serde_json::Value) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    let id = format!("{:04x}{:04x}", (ts & 0xFFFF) as u16, seq);
+
+    let envelope = serde_json::json!({
+        "id": id,
+        "from": from,
+        "to": target_name,
+        "kind": { "kind": kind_name, "body": body },
+        "ts": ts,
+    });
+    let wire = format!("@@RZ:{}", envelope.to_string());
+    rz_cli::nats_hub::publish_raw(target_name, wire.as_bytes())?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -1283,6 +1466,87 @@ _Fill in the session's primary objective._
             }
         }
 
+        Cmd::Delegate { target, task, description } => {
+            let from = sender_name();
+            let mut body = serde_json::json!({ "title": task });
+            if let Some(desc) = description {
+                body["description"] = serde_json::Value::String(desc);
+            }
+            publish_structured(&target, &from, "delegate", body)?;
+            eprintln!("delegated to {target}: {task}");
+        }
+
+        Cmd::Claim { issue_id } => {
+            let from = sender_name();
+            let body = serde_json::json!({ "issueId": issue_id });
+            publish_structured(&from, &from, "claim", body)?;
+            eprintln!("claimed issue {issue_id}");
+        }
+
+        Cmd::Release { issue_id, reason } => {
+            let from = sender_name();
+            let mut body = serde_json::json!({ "issueId": issue_id });
+            if let Some(r) = reason {
+                body["reason"] = serde_json::Value::String(r);
+            }
+            publish_structured(&from, &from, "release", body)?;
+            eprintln!("released issue {issue_id}");
+        }
+
+        Cmd::Complete { issue_id, summary } => {
+            let from = sender_name();
+            let mut body = serde_json::json!({ "issueId": issue_id });
+            if let Some(s) = summary {
+                body["summary"] = serde_json::Value::String(s);
+            }
+            publish_structured(&from, &from, "task_complete", body)?;
+            eprintln!("completed issue {issue_id}");
+        }
+
+        Cmd::Block { issue_id, reason } => {
+            let from = sender_name();
+            let mut body = serde_json::json!({ "issueId": issue_id });
+            if let Some(r) = reason {
+                body["reason"] = serde_json::Value::String(r);
+            }
+            publish_structured(&from, &from, "blocked", body)?;
+            eprintln!("blocked issue {issue_id}");
+        }
+
+        Cmd::Handoff { target, issue_id, summary } => {
+            let from = sender_name();
+            let mut body = serde_json::json!({ "issueId": issue_id });
+            if let Some(s) = summary {
+                body["summary"] = serde_json::Value::String(s);
+            }
+            publish_structured(&target, &from, "handoff", body)?;
+            eprintln!("handed off issue {issue_id} to {target}");
+        }
+
+        Cmd::Emit { target, kind, body } => {
+            let from = sender_name();
+            let actual_target = if target == "self" { from.clone() } else { target };
+
+            // Parse body: try as single JSON string first, then as key=value pairs
+            let body_json = if body.len() == 1 {
+                // Try parsing as JSON
+                match serde_json::from_str::<serde_json::Value>(&body[0]) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // Not JSON — try as key=value
+                        parse_kv_body(&body)
+                    }
+                }
+            } else if body.is_empty() {
+                serde_json::json!({})
+            } else {
+                parse_kv_body(&body)
+            };
+
+            publish_structured(&actual_target, &from, &kind, body_json)?;
+            eprintln!("emitted {kind} to {actual_target}");
+        }
+
         Cmd::Agent { name, no_bootstrap, permanent, command } => {
             rz_cli::pty::run_agent(&name, &command, no_bootstrap, permanent)?;
         }
@@ -1309,6 +1573,69 @@ _Fill in the session's primary objective._
 
         Cmd::Bridge { name, webhook, port, permanent } => {
             rz_cli::bridge::run_bridge(&name, &webhook, port, permanent)?;
+        }
+
+        Cmd::Kv(kv_cmd) => {
+            let rt = tokio::runtime::Runtime::new().wrap_err("tokio runtime")?;
+            rt.block_on(async {
+                let hub_url = rz_cli::nats_hub::hub_url()
+                    .ok_or_else(|| eyre::eyre!("RZ_HUB must be set for KV operations"))?;
+                let client = async_nats::connect(&hub_url).await
+                    .wrap_err("NATS connect")?;
+                let js = async_nats::jetstream::new(client.clone());
+
+                match kv_cmd {
+                    KvCmd::Get { bucket, key } => {
+                        let store = js.get_key_value(&bucket).await
+                            .map_err(|e| eyre::eyre!("bucket '{bucket}' not found: {e}"))?;
+                        match store.get(&key).await {
+                            Ok(Some(bytes)) => {
+                                let val = String::from_utf8_lossy(&bytes);
+                                println!("{val}");
+                            }
+                            Ok(None) => {
+                                eprintln!("key '{key}' not found in bucket '{bucket}'");
+                                std::process::exit(1);
+                            }
+                            Err(e) => bail!("get failed: {e}"),
+                        }
+                    }
+                    KvCmd::List { bucket } => {
+                        let store = js.get_key_value(&bucket).await
+                            .map_err(|e| eyre::eyre!("bucket '{bucket}' not found: {e}"))?;
+                        let mut keys = store.keys().await
+                            .map_err(|e| eyre::eyre!("list keys failed: {e}"))?;
+                        use futures::StreamExt;
+                        while let Some(key_result) = keys.next().await {
+                            match key_result {
+                                Ok(k) => println!("{k}"),
+                                Err(e) => eprintln!("key error: {e}"),
+                            }
+                        }
+                    }
+                    KvCmd::Watch { bucket, key } => {
+                        let store = js.get_key_value(&bucket).await
+                            .map_err(|e| eyre::eyre!("bucket '{bucket}' not found: {e}"))?;
+                        let mut watcher = if let Some(k) = &key {
+                            store.watch(k).await
+                        } else {
+                            store.watch_all().await
+                        }.map_err(|e| eyre::eyre!("watch failed: {e}"))?;
+                        eprintln!("watching bucket '{bucket}'...");
+                        use futures::StreamExt;
+                        while let Some(entry) = watcher.next().await {
+                            match entry {
+                                Ok(entry) => {
+                                    let val = String::from_utf8_lossy(&entry.value);
+                                    println!("{}: {val}", entry.key);
+                                }
+                                Err(e) => eprintln!("watch error: {e}"),
+                            }
+                        }
+                    }
+                }
+                Ok::<(), eyre::Report>(())
+            })?;
         }
     }
 

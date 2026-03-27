@@ -145,6 +145,62 @@ pub fn publish(target_name: &str, envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
+/// Publish raw bytes to the target agent's NATS subject.
+///
+/// Like [`publish`] but bypasses Envelope serialization — the caller
+/// provides the exact bytes to put on the wire.  Tries JetStream first,
+/// falls back to core NATS.
+pub fn publish_raw(target_name: &str, raw: &[u8]) -> Result<()> {
+    let url = hub_url().ok_or_else(|| eyre::eyre!("RZ_HUB not set"))?;
+    let subj = subject(target_name);
+    let payload_vec = raw.to_vec();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let client = async_nats::connect(&url)
+            .await
+            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+
+        // Try JetStream first
+        let js = async_nats::jetstream::new(client.clone());
+        if ensure_stream(&js, target_name).await.is_ok() {
+            match js
+                .publish(
+                    async_nats::Subject::from(subj.clone()),
+                    payload_vec.clone().into(),
+                )
+                .await
+            {
+                Ok(ack_future) => {
+                    match ack_future.await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            eprintln!("rz: jetstream ack failed, falling back to core: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("rz: jetstream publish failed, falling back to core: {e}");
+                }
+            }
+        }
+
+        // Fallback: core NATS
+        client
+            .publish(async_nats::Subject::from(subj), payload_vec.into())
+            .await
+            .map_err(|e| eyre::eyre!("NATS publish failed: {e}"))?;
+        client
+            .flush()
+            .await
+            .map_err(|e| eyre::eyre!("NATS flush failed: {e}"))?;
+        Ok::<(), eyre::Report>(())
+    })?;
+    Ok(())
+}
+
 /// Subscribe to messages for an agent and deliver them locally.
 ///
 /// **Smart**: uses JetStream pull consumer if available (durable, replays
