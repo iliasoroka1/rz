@@ -29,9 +29,9 @@ enum WorkspaceCmd {
 ///   rz send worker "do something"
 ///   rz list
 ///
-/// Use `rz help <command>` for details. Use `rz --help` to see all commands.
+/// Use `rz help <command>` for details. `rz help --all` shows all commands.
 #[derive(Parser)]
-#[command(name = "rz", version, about, long_about, subcommand_help_heading = "Commands (use --help to see all)")]
+#[command(name = "rz", version, about, long_about)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
