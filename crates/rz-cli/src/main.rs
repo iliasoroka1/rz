@@ -24,18 +24,14 @@ enum WorkspaceCmd {
 
 /// Universal messaging for AI agents — works in any terminal.
 ///
-/// Quick start (any terminal):
-///   rz agent --name worker -- claude     # run agent with PTY wrapping
-///   rz send worker "do something"        # send it a message
-///   rz list                              # see all agents
+/// Quick start:
+///   rz run --name worker claude --dangerously-skip-permissions
+///   rz send worker "do something"
+///   rz list
 ///
-/// With a multiplexer (tmux/cmux/zellij):
-///   rz run --name worker claude          # spawn agent in a pane
-///
-/// Cross-machine (set RZ_HUB=nats://...):
-///   rz send remote-worker "do something" # routes through NATS
+/// Use `rz help <command>` for details. Use `rz --help` to see all commands.
 #[derive(Parser)]
-#[command(name = "rz", version, about, long_about)]
+#[command(name = "rz", version, about, long_about, subcommand_help_heading = "Commands (use --help to see all)")]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
