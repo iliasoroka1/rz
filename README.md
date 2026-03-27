@@ -209,6 +209,10 @@ rz/
 
 ---
 
+## Built by agents, for agents
+
+Most of this codebase was written by AI agents using rz to coordinate. The tmux backend, Backend trait, PTY agent, NATS KV registry, and HTTP bridge were all implemented by Claude Code agents spawned via `rz run`, communicating through `rz send`, and reporting back to a lead agent. The tool was tested and debugged by the same agents that built it.
+
 ## Credits
 
 Forked from [rz](https://github.com/HodlOg/rz) by [@HodlOg](https://github.com/HodlOg).
