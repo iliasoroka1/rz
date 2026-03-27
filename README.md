@@ -1,12 +1,13 @@
 # rz
 
-**Universal messaging for AI agents. If it runs in a terminal, it can talk.**
+**Universal messaging for AI agents. If it runs in a terminal, it can talk. If it speaks HTTP, it can too.**
 
-Works with any AI coding agent — [Claude Code](https://claude.ai/code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), or any process that reads terminal input. No SDK, no framework — just a CLI tool that injects messages into terminals.
+Works with any AI coding agent — [Claude Code](https://claude.ai/code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), HTTP APIs, or any process. No SDK, no framework — just a CLI.
 
-Two commands to run agents:
-- **`rz agent --name X -- <cmd>`** — wraps any command in a PTY, works in any terminal
-- **`rz run --name X <cmd>`** — spawns a pane in [tmux](https://github.com/tmux/tmux), [cmux](https://cmux.dev), or [zellij](https://zellij.dev) (auto-detects), or falls back to headless PTY
+- **`rz run`** — start an agent (auto-detects tmux/cmux/zellij, or headless PTY)
+- **`rz agent`** — wrap any command in a PTY, works in any terminal
+- **`rz bridge`** — connect HTTP services as agents (no rz install needed on their side)
+- **`rz send`** — message any agent, anywhere
 
 Connect agents across machines with [NATS](https://nats.io) (`export RZ_HUB=nats://...`).
 
@@ -28,91 +29,83 @@ cd rz
 make install
 ```
 
-### Crates
-
-| Crate | Description |
-|---|---|
-| [`rz-agent`](https://crates.io/crates/rz-agent) | CLI binary — all backends and transports |
-| [`rz-agent-protocol`](https://crates.io/crates/rz-agent-protocol) | `@@RZ:` wire format library |
-| `rz-hub` | Zellij WASM plugin (build separately) |
-
 ---
 
 ## Quick start
 
-### Any terminal (no multiplexer)
+### Terminal agents
 
 ```bash
-# Start NATS (one-time setup)
+# Start NATS (one-time)
 nats-server -js
-export RZ_HUB=nats://localhost:4222    # add to your shell profile
+export RZ_HUB=nats://localhost:4222
 
-# Terminal 1: run an agent
-rz agent --name worker -- claude --dangerously-skip-permissions
+# Run agents
+rz run --name worker claude --dangerously-skip-permissions
+rz run --name reviewer gemini
 
-# Terminal 2: run another agent
-rz agent --name lead -- claude --dangerously-skip-permissions
-
-# Terminal 3: send a message
+# Send messages
 rz send worker "refactor the auth module"
+rz ps
 ```
 
-`rz agent` wraps any command in a PTY and subscribes to NATS. Messages arrive as `@@RZ:` lines injected into the child's terminal input. Works with any agent that reads stdin.
+### HTTP agents
 
-```
-┌──────────────┐       ┌──────────┐       ┌───────────────────────┐
-│ rz send      │──pub──│  NATS    │──sub──│ rz agent --name X     │
-│ worker "msg" │       │ agent.X  │       │  └─ injects @@RZ:     │
-└──────────────┘       └──────────┘       │     into child's PTY  │
-                                          │                       │
-                                          │  child = claude, gemini│
-                                          │  opencode, bash, ...  │
-                                          └───────────────────────┘
-```
-
-### Inside a multiplexer (tmux / cmux / zellij)
+Any HTTP service can be an rz agent through the bridge — no rz install needed on the service side:
 
 ```bash
-# Auto-detects your multiplexer, spawns panes
-rz run --name lead -p "refactor auth" claude --dangerously-skip-permissions
-rz run --name coder -p "implement tokens" claude --dangerously-skip-permissions
-
-# Observe and interact
-rz list                    # see who's alive
-rz log lead                # read lead's messages
-rz send lead "wrap up"     # intervene
+# Start a bridge for your HTTP service
+rz bridge --name api-bot --webhook http://localhost:7070/inbox --port 7071
 ```
+
+The bridge does two things:
+
+**Inbound** — messages from other agents arrive as POST to your webhook:
+```json
+{"id":"a1b2","from":"worker","text":"process this data","ts":1774568000}
+```
+
+**Outbound** — your service sends messages by POSTing to the bridge:
+```bash
+curl -X POST http://localhost:7071/send \
+  -H "Content-Type: application/json" \
+  -d '{"to":"worker","text":"here are the results"}'
+```
+
+That's it. Your HTTP service is now a full rz agent — discoverable, messageable, and connected to every other agent on the NATS hub.
 
 ### Permanent agents
 
-For long-running agents on a server that should persist across restarts:
+For long-running agents that should survive restarts and receive offline messages:
 
 ```bash
 rz agent --name server-worker --permanent -- claude --dangerously-skip-permissions
+rz bridge --name api-bot --permanent --webhook http://localhost:7070/inbox
 ```
 
-The `--permanent` flag keeps the registry entry after exit. When the agent restarts with the same name, it picks up any messages sent while it was offline (via JetStream).
+JetStream stores messages while the agent is offline. On restart with the same name, it picks up where it left off.
 
-### Cross-machine (NATS)
+### Cross-machine
 
-Agents on different machines, in different multiplexers, or in plain terminals — all talk through NATS:
+Agents on different machines, different multiplexers, different languages — all talk through NATS:
 
 ```bash
-# Machine A (tmux)
+# Machine A (tmux) — terminal agent
 export RZ_HUB=nats://nats.example.com:4222
 rz run --name worker claude --dangerously-skip-permissions
 
-# Machine B (plain terminal)
+# Machine B (plain terminal) — another terminal agent
 export RZ_HUB=nats://nats.example.com:4222
 rz agent --name reviewer -- gemini
 
-# Machine C (cmux)
+# Machine C — HTTP service via bridge
 export RZ_HUB=nats://nats.example.com:4222
-rz send worker "implement feature X"
-rz send reviewer "review worker's changes"
-```
+rz bridge --name api-bot --webhook http://localhost:7070/inbox
 
-JetStream (`nats-server -js`) gives durable delivery — messages survive agent restarts and offline periods.
+# Any machine — send to any agent
+rz send worker "implement feature X"
+rz send api-bot "process batch 42"
+```
 
 ---
 
@@ -124,21 +117,19 @@ Every message is a single line: `@@RZ:<json>`
 {"id":"a1b2","from":"lead","to":"worker","kind":{"kind":"chat","body":{"text":"do X"}},"ts":1774488000}
 ```
 
-The `@@RZ:` prefix lets agents distinguish protocol messages from normal terminal output.
-
 ### Registry
 
 Agents register in two places:
-- **NATS KV** (`rz-agents` bucket) — global, real-time discovery when `RZ_HUB` is set
+- **NATS KV** (`rz-agents` bucket) — global, real-time discovery
 - **Local file** (`~/.rz/registry.json`) — fallback when NATS is unavailable
 
-Temporary agents auto-expire from NATS KV after 10 minutes of inactivity. Permanent agents (`--permanent`) persist until explicitly deregistered.
+Temporary agents are pruned after 10 minutes of inactivity. Permanent agents (`--permanent`) persist until explicitly removed.
 
 ### Message kinds
 
 | Kind | Purpose |
 |---|---|
-| `chat` | General communication (the only one you need) |
+| `chat` | General communication |
 | `ping` / `pong` | Liveness check |
 | `error` | Error report |
 | `timer` | Self-scheduled wakeup |
@@ -147,23 +138,15 @@ Temporary agents auto-expire from NATS KV after 10 minutes of inactivity. Perman
 
 ## Backends
 
-| Backend | How to use | Detection | Best for |
-|---|---|---|---|
-| PTY agent | `rz agent --name X -- <cmd>` | manual | Any terminal, SSH, CI, servers |
-| tmux | `rz run --name X <cmd>` | `TMUX` env | tmux users |
-| cmux | `rz run --name X <cmd>` | `CMUX_SURFACE_ID` env | Claude Code desktop app |
-| zellij | `rz run --name X <cmd>` | `ZELLIJ` env | Zellij users |
-
-## Transports
-
-| Transport | Delivery | Best for |
+| Backend | Command | Best for |
 |---|---|---|
-| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, PTY agents |
-| `tmux` | `tmux send-keys` into pane | Local tmux agents |
-| `cmux` | Paste into cmux surface | Local cmux agents |
-| `zellij` | Paste into zellij pane | Local zellij agents |
-| `file` | Write to `~/.rz/mailboxes/<name>/inbox/` | Fallback |
-| `http` | POST to URL | Network agents, APIs |
+| PTY agent | `rz agent --name X -- <cmd>` | Any terminal, SSH, CI, servers |
+| HTTP bridge | `rz bridge --name X --webhook <url>` | HTTP APIs, web services |
+| tmux | `rz run --name X <cmd>` | tmux users |
+| cmux | `rz run --name X <cmd>` | Claude Code desktop app |
+| zellij | `rz run --name X <cmd>` | Zellij users |
+
+`rz run` auto-detects the multiplexer. Without one, it falls back to a headless PTY agent.
 
 ---
 
@@ -172,47 +155,32 @@ Temporary agents auto-expire from NATS KV after 10 minutes of inactivity. Perman
 ### Run agents
 | Command | Description |
 |---|---|
-| `rz agent --name X -- <cmd>` | Run agent in any terminal (PTY + NATS) |
-| `rz agent --name X --permanent -- <cmd>` | Run persistent agent (survives restarts) |
-| `rz run <cmd> --name X -p "task"` | Spawn agent in multiplexer pane |
-| `rz list` / `rz ps` | List all agents (local + NATS KV) |
-| `rz close <target>` / `rz kill` | Close a pane/surface |
+| `rz run --name X <cmd>` | Start an agent (auto-detects environment) |
+| `rz agent --name X -- <cmd>` | Run agent with PTY wrapping |
+| `rz bridge --name X --webhook <url>` | Bridge an HTTP service to NATS |
+| `rz ps` | List all agents |
+| `rz kill <target>` | Stop an agent |
 
-### Send messages
+### Messaging
 | Command | Description |
 |---|---|
 | `rz send <target> "msg"` | Send message (auto-routes) |
-| `rz send --wait 30 <target> "msg"` | Send and wait for reply |
 | `rz broadcast "msg"` | Send to all agents |
-
-### Discovery
-| Command | Description |
-|---|---|
-| `rz id` | Print this agent's ID |
-| `rz register --name X --transport T` | Register in registry |
-| `rz deregister X` | Remove from registry |
 | `rz ping <target>` | Check liveness |
-
-### NATS
-| Command | Description |
-|---|---|
-| `rz listen <name> --deliver <method>` | Subscribe and deliver locally |
-| `rz timer 30 "label"` | Schedule a self-wakeup |
-
-Delivery methods: `stdout`, `file`, `cmux:<id>`, `zellij:<pane_id>`, `tmux:<pane_id>`
 
 ### Observe
 | Command | Description |
 |---|---|
-| `rz log <target>` | Show `@@RZ:` messages |
-| `rz dump <target>` | Full scrollback |
-| `rz gather <ids...>` | Collect last message from each |
+| `rz logs <target>` | Show agent's scrollback |
+| `rz log <target>` | Show `@@RZ:` protocol messages only |
 
-### Workspace
+### Registry
 | Command | Description |
 |---|---|
-| `rz init` | Create shared workspace |
-| `rz dir` | Print workspace path |
+| `rz register --name X --transport T` | Manually register an agent |
+| `rz deregister X` | Remove from registry |
+
+Use `rz help <command>` for details. `rz help --all` shows all commands.
 
 ---
 
@@ -225,7 +193,8 @@ rz/
 │   ├── rz-cli/
 │   │   ├── main.rs           # CLI + auto-detect backend
 │   │   ├── backend.rs        # Backend trait (Cmux, Zellij, Tmux)
-│   │   ├── pty.rs            # PTY agent (no multiplexer needed)
+│   │   ├── pty.rs            # PTY agent wrapper
+│   │   ├── bridge.rs         # HTTP-to-NATS bridge
 │   │   ├── tmux.rs           # tmux CLI wrapper
 │   │   ├── cmux.rs           # cmux socket client
 │   │   ├── zellij.rs         # zellij CLI wrapper
