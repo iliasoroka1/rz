@@ -27,7 +27,7 @@ enum WorkspaceCmd {
 /// Quick start:
 ///   rz run --name worker claude --dangerously-skip-permissions
 ///   rz send worker "do something"
-///   rz list
+///   rz ps
 ///
 /// Use `rz help <command>` for details. `rz help --all` shows all commands.
 #[derive(Parser)]
@@ -39,7 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Spawn an agent (auto-detects tmux/cmux/zellij, or headless PTY).
+    /// Start an agent (auto-detects tmux/cmux/zellij, or headless PTY).
     ///
     /// Auto-detects tmux/cmux/zellij. Without a multiplexer, falls back
     /// to a background PTY agent (requires --name and RZ_HUB).
@@ -47,8 +47,8 @@ enum Cmd {
     /// Examples:
     ///   rz run --name worker claude --dangerously-skip-permissions
     ///   rz run --name coder -p "implement auth" claude --dangerously-skip-permissions
-    #[command(alias = "run")]
-    Spawn {
+    #[command(alias = "spawn")]
+    Run {
         /// Command to run.
         command: String,
         /// Surface name.
@@ -92,9 +92,9 @@ enum Cmd {
         wait: Option<u64>,
     },
 
-    /// List all agents (local panes + registry + NATS KV).
-    #[command(alias = "ps")]
-    List,
+    /// Show all agents (local panes + registry + NATS KV).
+    #[command(alias = "list")]
+    Ps,
 
     /// Run a command as a named rz agent with PTY wrapping (no multiplexer needed).
     ///
@@ -250,15 +250,13 @@ enum Cmd {
     /// Includes message counts from each surface's scrollback.
     Status,
 
-    /// Dump an agent's scrollback to stdout.
-    ///
-    /// Alias: `rz logs` (docker-style)
+    /// Show an agent's scrollback.
     ///
     /// Examples:
-    ///   rz dump worker                    # full scrollback
-    ///   rz dump worker --last 50          # last 50 lines only
-    #[command(alias = "logs")]
-    Dump {
+    ///   rz logs worker
+    ///   rz logs worker --last 50
+    #[command(alias = "dump")]
+    Logs {
         /// Target agent name or ID.
         pane: String,
         /// Only show the last N lines.
@@ -282,11 +280,9 @@ enum Cmd {
         last: Option<usize>,
     },
 
-    /// Close an agent's pane.
-    ///
-    /// Alias: `rz kill` (docker-style)
-    #[command(alias = "kill")]
-    Close {
+    /// Stop an agent.
+    #[command(alias = "close")]
+    Kill {
         /// Target agent name or ID.
         pane: String,
     },
@@ -757,7 +753,7 @@ _Fill in the session's primary objective._
             println!("{}", ws.display());
         }
 
-        Cmd::Spawn {
+        Cmd::Run {
             command,
             name,
             no_bootstrap,
@@ -1021,7 +1017,7 @@ _Fill in the session's primary objective._
             eprintln!("broadcast to {sent} surfaces");
         }
 
-        Cmd::List => {
+        Cmd::Ps => {
             println!("{:<18} {:<38} {:<20} {:<8}",
                 "NAME", "ID", "TITLE", "TYPE");
 
@@ -1071,7 +1067,7 @@ _Fill in the session's primary objective._
             print!("{}", status::format_summary(&summary));
         }
 
-        Cmd::Dump { pane, last } => {
+        Cmd::Logs { pane, last } => {
             let pane = resolve_target_cmux(&pane)?;
             let text = cmux::read_text(&pane)?;
             if let Some(n) = last {
@@ -1099,7 +1095,7 @@ _Fill in the session's primary objective._
             }
         }
 
-        Cmd::Close { pane } => {
+        Cmd::Kill { pane } => {
             let pane = resolve_target_cmux(&pane)?;
             cmux::close(&pane)?;
         }
