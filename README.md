@@ -9,7 +9,7 @@ Three ways to run:
 - **`rz agent`** — in any plain terminal (PTY wrapping, no multiplexer needed)
 - **NATS** — bridge agents across machines, multiplexers, or both
 
-**Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg). Zellij support based on [meepo/rz](https://github.com/meepo/rz).
+**Fork of [rz](https://github.com/HodlOg/rz)** by [@HodlOg](https://github.com/HodlOg).
 
 ---
 
@@ -19,7 +19,7 @@ Three ways to run:
 cargo install rz-agent
 ```
 
-From source (macOS requires codesign):
+From source:
 
 ```bash
 git clone https://github.com/iliasoroka1/rz
@@ -56,7 +56,7 @@ rz agent --name lead -- claude --dangerously-skip-permissions
 rz send worker "refactor the auth module"
 ```
 
-`rz agent` wraps any command in a PTY and subscribes to NATS. Messages arrive as `@@RZ:` lines injected directly into the child's terminal input. Works with any agent that reads from stdin — Claude Code, Gemini CLI, OpenCode, or even plain bash.
+`rz agent` wraps any command in a PTY and subscribes to NATS. Messages arrive as `@@RZ:` lines injected into the child's terminal input. Works with any agent that reads stdin.
 
 ```
 ┌──────────────┐       ┌──────────┐       ┌───────────────────────┐
@@ -82,6 +82,16 @@ rz log lead                # read lead's messages
 rz send lead "wrap up"     # intervene
 ```
 
+### Permanent agents
+
+For long-running agents on a server that should persist across restarts:
+
+```bash
+rz agent --name server-worker --permanent -- claude --dangerously-skip-permissions
+```
+
+The `--permanent` flag keeps the registry entry after exit. When the agent restarts with the same name, it picks up any messages sent while it was offline (via JetStream).
+
 ### Cross-machine (NATS)
 
 Agents on different machines, in different multiplexers, or in plain terminals — all talk through NATS:
@@ -91,7 +101,7 @@ Agents on different machines, in different multiplexers, or in plain terminals �
 export RZ_HUB=nats://nats.example.com:4222
 rz run --name worker claude --dangerously-skip-permissions
 
-# Machine B (plain terminal, no multiplexer)
+# Machine B (plain terminal)
 export RZ_HUB=nats://nats.example.com:4222
 rz agent --name reviewer -- gemini
 
@@ -101,7 +111,7 @@ rz send worker "implement feature X"
 rz send reviewer "review worker's changes"
 ```
 
-JetStream enabled (`nats-server -js`) gives durable delivery — messages survive agent restarts.
+JetStream (`nats-server -js`) gives durable delivery — messages survive agent restarts and offline periods.
 
 ---
 
@@ -113,7 +123,15 @@ Every message is a single line: `@@RZ:<json>`
 {"id":"a1b2","from":"lead","to":"worker","kind":{"kind":"chat","body":{"text":"do X"}},"ts":1774488000}
 ```
 
-The `@@RZ:` prefix lets agents distinguish protocol messages from normal terminal output. When an agent receives one, it processes the instruction and replies with `rz send`.
+The `@@RZ:` prefix lets agents distinguish protocol messages from normal terminal output.
+
+### Registry
+
+Agents register in two places:
+- **NATS KV** (`rz-agents` bucket) — global, real-time discovery when `RZ_HUB` is set
+- **Local file** (`~/.rz/registry.json`) — fallback when NATS is unavailable
+
+Temporary agents auto-expire from NATS KV after 10 minutes of inactivity. Permanent agents (`--permanent`) persist until explicitly deregistered.
 
 ### Message kinds
 
@@ -130,20 +148,20 @@ The `@@RZ:` prefix lets agents distinguish protocol messages from normal termina
 
 | Backend | How to use | Detection | Best for |
 |---|---|---|---|
-| PTY agent | `rz agent --name X -- <cmd>` | manual | Any terminal, SSH, CI, remote servers |
+| PTY agent | `rz agent --name X -- <cmd>` | manual | Any terminal, SSH, CI, servers |
 | tmux | `rz run --name X <cmd>` | `TMUX` env | tmux users |
 | cmux | `rz run --name X <cmd>` | `CMUX_SURFACE_ID` env | Claude Code desktop app |
-| zellij | `rz run --name X <cmd>` | `ZELLIJ` env | Zellij terminal users |
+| zellij | `rz run --name X <cmd>` | `ZELLIJ` env | Zellij users |
 
 ## Transports
 
 | Transport | Delivery | Best for |
 |---|---|---|
-| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, cross-backend, PTY agents |
+| `nats` | Publish to NATS subject `agent.<name>` | Cross-machine, PTY agents |
 | `tmux` | `tmux send-keys` into pane | Local tmux agents |
 | `cmux` | Paste into cmux surface | Local cmux agents |
 | `zellij` | Paste into zellij pane | Local zellij agents |
-| `file` | Write to `~/.rz/mailboxes/<name>/inbox/` | Universal fallback |
+| `file` | Write to `~/.rz/mailboxes/<name>/inbox/` | Fallback |
 | `http` | POST to URL | Network agents, APIs |
 
 ---
@@ -154,8 +172,9 @@ The `@@RZ:` prefix lets agents distinguish protocol messages from normal termina
 | Command | Description |
 |---|---|
 | `rz agent --name X -- <cmd>` | Run agent in any terminal (PTY + NATS) |
+| `rz agent --name X --permanent -- <cmd>` | Run persistent agent (survives restarts) |
 | `rz run <cmd> --name X -p "task"` | Spawn agent in multiplexer pane |
-| `rz list` / `rz ps` | List all agents |
+| `rz list` / `rz ps` | List all agents (local + NATS KV) |
 | `rz close <target>` / `rz kill` | Close a pane/surface |
 
 ### Send messages
@@ -169,7 +188,7 @@ The `@@RZ:` prefix lets agents distinguish protocol messages from normal termina
 | Command | Description |
 |---|---|
 | `rz id` | Print this agent's ID |
-| `rz register --name X --transport T` | Register in `~/.rz/registry.json` |
+| `rz register --name X --transport T` | Register in registry |
 | `rz deregister X` | Remove from registry |
 | `rz ping <target>` | Check liveness |
 
@@ -204,13 +223,13 @@ rz/
 │   ├── rz-protocol/        # @@RZ: wire format
 │   ├── rz-cli/
 │   │   ├── main.rs           # CLI + auto-detect backend
-│   │   ├── backend.rs        # Backend trait (CmuxBackend, ZellijBackend)
+│   │   ├── backend.rs        # Backend trait (Cmux, Zellij, Tmux)
 │   │   ├── pty.rs            # PTY agent (no multiplexer needed)
 │   │   ├── tmux.rs           # tmux CLI wrapper
 │   │   ├── cmux.rs           # cmux socket client
 │   │   ├── zellij.rs         # zellij CLI wrapper
 │   │   ├── nats_hub.rs       # NATS (JetStream + core)
-│   │   ├── registry.rs       # ~/.rz/registry.json
+│   │   ├── registry.rs       # Local + NATS KV registry
 │   │   ├── mailbox.rs        # File-based message store
 │   │   ├── bootstrap.rs      # Agent bootstrap message
 │   │   └── log.rs            # @@RZ: message extraction
@@ -222,7 +241,7 @@ rz/
 
 ## Credits
 
-Forked from [rz](https://github.com/HodlOg/rz) by [@HodlOg](https://github.com/HodlOg). Zellij support based on [meepo/rz](https://github.com/meepo/rz).
+Forked from [rz](https://github.com/HodlOg/rz) by [@HodlOg](https://github.com/HodlOg).
 
 ## License
 
