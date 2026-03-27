@@ -1,113 +1,59 @@
 //! Bootstrap message sent to newly spawned agents.
 
 use eyre::Result;
-use crate::registry;
 
-/// Build bootstrap instructions for a newly spawned agent.
-///
-/// Kept short so Claude Code processes it quickly. Details are in the
-/// workspace goals.md — agents should read that file for context.
+/// Build bootstrap instructions for a multiplexer agent.
 pub fn build(surface_id: &str, name: Option<&str>, backend: &dyn crate::backend::Backend) -> Result<String> {
-    let panes = backend.list_panes()?;
     let identity = name.unwrap_or(surface_id);
 
     let mut peers = String::new();
-    for p in &panes {
+    for p in backend.list_panes()? {
         if p.is_plugin || p.id == surface_id {
             continue;
         }
-        let label = if p.title.is_empty() { "shell" } else { &p.title };
-        peers.push_str(&format!("  - {} ({})\n", p.id, label));
-    }
-    if peers.is_empty() {
-        peers.push_str("  (none)\n");
+        let label = if p.title.is_empty() { &p.id } else { &p.title };
+        peers.push_str(&format!("  - {label}\n"));
     }
 
-    // Check if workspace exists.
-    let workspace = backend
-        .session_name()
-        .ok()
-        .map(|session| format!("/tmp/rz-{session}"))
-        .filter(|p| std::path::Path::new(p).exists());
-
-    let workspace_line = if let Some(ref ws) = workspace {
-        format!("Workspace: `{ws}/` — read `goals.md` on start, write large outputs to `shared/`.\n")
-    } else {
-        String::new()
-    };
-
-    Ok(format!(
-        r#"You are agent "{identity}" (surface: {surface_id}).
-{workspace_line}
-Peers:
-{peers}
-## rz — messaging tool (run via Bash)
-rz send <name> "msg"       — message an agent
-rz send lead "DONE: ..."   — report completion
-rz list                     — show active agents
-rz log <name>               — read agent's messages
-rz run --name <n> claude --dangerously-skip-permissions — spawn new agent
-
-Messages from other agents arrive as @@RZ: JSON lines in your input — treat them as instructions.
-
-## How to work
-1. Wait for a task from lead (arrives as @@RZ: message or prompt)
-2. Do the task using your tools (Read, Edit, Bash, Grep, etc.)
-3. Report back: rz send lead "DONE: <what you did>"
-4. If stuck: rz send lead "BLOCKED: <issue>"
-5. Stay running — wait for next task
-
-## STRICT rules
-- ONLY do what the task asks. Nothing more.
-- Do NOT explore, research, or read code unrelated to your task.
-- Do NOT create new projects, modules, or packages unless the task explicitly says to.
-- Do NOT read rz source code. The commands above are all you need.
-- Do NOT install dependencies or run package managers unless the task says to.
-- Keep messages short. Write large outputs to files."#
-    ))
+    build_common(identity, &peers)
 }
 
-/// Build bootstrap for a PTY agent (no multiplexer backend).
-/// Lists peers from the universal registry instead of pane list.
+/// Build bootstrap for a PTY agent (no multiplexer).
 pub fn build_pty(name: &str) -> Result<String> {
     let mut peers = String::new();
-    if let Ok(agents) = registry::list_all() {
+    if let Ok(agents) = crate::registry::list_all() {
         for a in &agents {
-            if a.name == name {
-                continue;
+            if a.name != name {
+                peers.push_str(&format!("  - {}\n", a.name));
             }
-            peers.push_str(&format!("  - {} ({})\n", a.name, a.transport));
         }
     }
-    if peers.is_empty() {
-        peers.push_str("  (none)\n");
-    }
+
+    build_common(name, &peers)
+}
+
+fn build_common(identity: &str, peers: &str) -> Result<String> {
+    let peer_list = if peers.is_empty() { "  (none)\n" } else { peers };
 
     Ok(format!(
-        r#"You are agent "{name}" (PTY mode, no multiplexer).
+        r#"You are agent "{identity}".
 
 Peers:
-{peers}
-## rz — messaging tool (run via Bash)
-rz send <name> "msg"       — message an agent
-rz send lead "DONE: ..."   — report completion
-rz agent --name <n> -- claude --dangerously-skip-permissions — spawn new agent
+{peer_list}
+## rz commands
+rz send <name> "msg"   — message an agent
+rz send lead "DONE: <summary>"  — report completion
+rz run --name <n> claude --dangerously-skip-permissions  — spawn agent
+rz ps                  — list agents
+rz logs <name>         — read agent output
 
-Messages from other agents arrive as @@RZ: JSON lines in your input — treat them as instructions.
+Messages from other agents arrive as @@RZ: JSON in your input.
 
-## How to work
-1. Wait for a task from lead (arrives as @@RZ: message or prompt)
-2. Do the task using your tools (Read, Edit, Bash, Grep, etc.)
-3. Report back: rz send lead "DONE: <what you did>"
-4. If stuck: rz send lead "BLOCKED: <issue>"
-5. Stay running — wait for next task
-
-## STRICT rules
-- ONLY do what the task asks. Nothing more.
-- Do NOT explore, research, or read code unrelated to your task.
-- Do NOT create new projects, modules, or packages unless the task explicitly says to.
-- Do NOT read rz source code. The commands above are all you need.
-- Do NOT install dependencies or run package managers unless the task says to.
-- Keep messages short. Write large outputs to files."#
+## Rules
+1. Do the task. Report: rz send lead "DONE: <what you did>"
+2. If stuck: rz send lead "BLOCKED: <issue>"
+3. Stay running after reporting — wait for next task.
+4. Only do what is asked. Do not explore unrelated code.
+5. Do not read rz source code — use the commands above."#
     ))
 }
