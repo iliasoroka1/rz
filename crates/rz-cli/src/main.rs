@@ -83,14 +83,9 @@ enum Cmd {
 
     /// Send a message to an agent.
     ///
-    /// By default wraps the message in an @@RZ: protocol envelope with
-    /// sender ID and timestamp. Use --raw for plain text.
-    ///
     /// Examples:
-    ///   rz send <surface_id> "research this topic"
-    ///   rz send --raw <surface_id> "ls -la"
-    ///   rz send --ref abc123 <surface_id> "replying to your message"
-    ///   rz send --wait 30 <surface_id> "do this and reply"
+    ///   rz send worker "do this task"
+    ///   rz send lead "DONE: finished the task"
     Send {
         /// Target agent name or ID.
         pane: String,
@@ -99,26 +94,23 @@ enum Cmd {
         /// Send plain text instead of @@RZ: envelope.
         #[arg(long)]
         raw: bool,
-        /// Sender identity. Defaults to CMUX_SURFACE_ID.
+        /// Override sender identity.
         #[arg(long)]
         from: Option<String>,
         /// Reference a previous message ID (for threading).
         #[arg(long)]
         r#ref: Option<String>,
-        /// Block until a reply (with matching ref) arrives in own scrollback.
-        /// Value is timeout in seconds.
+        /// Block until a reply arrives (timeout in seconds).
         #[arg(long)]
         wait: Option<u64>,
     },
 
-    /// Send a message and block until the agent replies (MPI-style ask).
+    /// Send a message and block until the agent replies.
     ///
-    /// Shorthand for `rz send --wait <timeout> <surface_id> "message"`.
-    /// Useful for synchronous request/reply between agents.
+    /// Shorthand for `rz send --wait 60 <name> "message"`.
     ///
     /// Examples:
-    ///   rz ask <surface_id> "what is the status?"
-    ///   rz ask <surface_id> "are you done?" --timeout 120
+    ///   rz ask worker "what is the status?"
     Ask {
         /// Target agent name or ID.
         pane: String,
@@ -237,8 +229,8 @@ enum Cmd {
     /// Alias: `rz logs` (docker-style)
     ///
     /// Examples:
-    ///   rz dump <surface_id>              # full scrollback
-    ///   rz logs <surface_id> --last 50    # last 50 lines only
+    ///   rz dump worker                    # full scrollback
+    ///   rz dump worker --last 50          # last 50 lines only
     #[command(alias = "logs")]
     Dump {
         /// Target agent name or ID.
@@ -254,8 +246,8 @@ enum Cmd {
     /// normal shell output.
     ///
     /// Examples:
-    ///   rz log <surface_id>
-    ///   rz log <surface_id> --last 10
+    ///   rz log worker
+    ///   rz log worker --last 10
     Log {
         /// Target agent name or ID.
         pane: String,
@@ -282,8 +274,8 @@ enum Cmd {
     /// spawning sub-agents and won't respond instantly.
     ///
     /// Examples:
-    ///   rz ping <surface_id>
-    ///   rz ping <surface_id> --timeout 120
+    ///   rz ping worker
+    ///   rz ping worker --timeout 120
     Ping {
         /// Target agent name or ID.
         pane: String,
@@ -338,7 +330,7 @@ enum Cmd {
     /// Examples:
     ///   rz notify "Build complete"
     ///   rz notify "Test failed" --body "3 tests failed in auth module"
-    ///   rz notify "Done" --surface <surface_id>
+    ///   rz notify "Done"
     Notify {
         /// Notification title.
         title: String,
@@ -371,7 +363,7 @@ enum Cmd {
     /// Transport determines how messages are delivered.
     ///
     /// Examples:
-    ///   rz register --name myagent --transport cmux --endpoint <surface_id>
+    ///   rz register --name myagent --transport nats
     ///   rz register --name worker --transport file
     ///   rz register --name api --transport http --endpoint http://localhost:7070
     Register {
@@ -404,12 +396,12 @@ enum Cmd {
     /// Examples:
     ///   rz listen myagent
     ///   rz listen myagent --deliver file
-    ///   rz listen myagent --deliver cmux:<surface_id>
+    ///   rz listen worker --deliver stdout
     
     Listen {
         /// Agent name to listen for.
         name: String,
-        /// How to deliver: 'stdout' (default), 'file', or 'cmux:<surface_id>'.
+        /// How to deliver: 'stdout', 'file', 'cmux:<id>', 'zellij:<id>', 'tmux:<id>'.
         #[arg(long, default_value = "stdout")]
         deliver: String,
     },
