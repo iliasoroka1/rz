@@ -197,6 +197,9 @@ enum Cmd {
     /// Send a message and block until the agent replies.
     ///
     /// Shorthand for `rz send --wait 60 <name> "message"`.
+    /// Note: in a multiplexer the reply also arrives in your pane as an
+    /// @@RZ: line (that's the transport) — this command additionally
+    /// prints it so scripts can capture the answer synchronously.
     ///
     /// Examples:
     ///   rz ask worker "what is the status?"
@@ -627,6 +630,20 @@ enum Cmd {
     #[command(subcommand)]
     Kv(KvCmd),
 
+    /// Sweep orphaned NATS state (requires RZ_HUB).
+    ///
+    /// Removes: legacy unscoped streams (pre-session format), current-session
+    /// streams whose agent is no longer registered, and stale KV entries.
+    /// Other sessions' streams are never touched. Dry-run by default.
+    ///
+    /// Examples:
+    ///   rz gc          # list what would be removed
+    ///   rz gc --yes    # actually remove it
+    Gc {
+        /// Actually delete (default is a dry-run listing).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Path to the name→UUID registry file, scoped by session so a process
@@ -1853,6 +1870,103 @@ _Fill in the session's primary objective._
 
         Cmd::Bridge { name, webhook, port, permanent } => {
             rz_cli::bridge::run_bridge(&name, &webhook, port, permanent)?;
+        }
+
+        Cmd::Gc { yes } => {
+            if rz_cli::nats_hub::hub_url().is_none() {
+                bail!("RZ_HUB must be set for gc");
+            }
+            let sid = rz_cli::session::session_id();
+            let registered: std::collections::HashSet<String> = {
+                let mut names = std::collections::HashSet::new();
+                if let Ok(agents) = rz_cli::registry::list_all() {
+                    names.extend(agents.into_iter().map(|a| a.name));
+                }
+                if let Ok(agents) = rz_cli::registry::nats_list() {
+                    names.extend(agents.into_iter().map(|a| a.name));
+                }
+                names
+            };
+
+            let client = rz_cli::nats_hub::client()?;
+            let mut removed = 0usize;
+            rz_cli::nats_hub::runtime().block_on(async {
+                use futures::StreamExt;
+                let js = async_nats::jetstream::new(client);
+
+                // Streams: legacy unscoped (agent.<name>) or current-session
+                // orphans (agent.<sid>.<name> with no registered agent).
+                let mut streams = js.streams();
+                let mut candidates: Vec<(String, String, u64)> = Vec::new();
+                while let Some(info) = streams.next().await {
+                    let Ok(info) = info else { continue };
+                    let name = info.config.name.clone();
+                    if !name.starts_with("RZ_") {
+                        continue;
+                    }
+                    let Some(subj) = info.config.subjects.first() else { continue };
+                    let tokens: Vec<&str> = subj.split('.').collect();
+                    let reason = match tokens.as_slice() {
+                        ["agent", _n] => Some("legacy unscoped stream"),
+                        ["agent", s, n] if *s == sid && !registered.contains(*n) => {
+                            Some("no registered agent in this session")
+                        }
+                        _ => None,
+                    };
+                    if let Some(reason) = reason {
+                        candidates.push((name, reason.to_string(), info.state.messages));
+                    }
+                }
+                for (name, reason, msgs) in &candidates {
+                    if yes {
+                        match js.delete_stream(name).await {
+                            Ok(_) => {
+                                println!("removed stream {name} ({reason}, {msgs} msgs dropped)");
+                                removed += 1;
+                            }
+                            Err(e) => eprintln!("rz: gc: delete {name} failed: {e}"),
+                        }
+                    } else {
+                        println!("would remove stream {name} ({reason}, {msgs} msgs)");
+                    }
+                }
+
+                // KV: legacy unscoped keys (no '.') and stale entries.
+                if let Ok(store) = js.get_key_value("rz-agents").await {
+                    if let Ok(mut keys) = store.keys().await {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        while let Some(Ok(key)) = keys.next().await {
+                            let legacy = !key.contains('.');
+                            let stale = match store.get(&key).await {
+                                Ok(Some(v)) => serde_json::from_slice::<rz_cli::registry::AgentEntry>(&v)
+                                    .map(|e| rz_cli::registry::is_stale(&e, now_ms))
+                                    .unwrap_or(true),
+                                _ => false,
+                            };
+                            if legacy || stale {
+                                let reason = if legacy { "legacy key" } else { "stale entry" };
+                                if yes {
+                                    let _ = store.delete(&key).await;
+                                    println!("removed KV entry {key} ({reason})");
+                                    removed += 1;
+                                } else {
+                                    println!("would remove KV entry {key} ({reason})");
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok::<(), eyre::Report>(())
+            })?;
+
+            if yes {
+                eprintln!("gc: removed {removed} objects");
+            } else {
+                eprintln!("gc: dry run — pass --yes to delete");
+            }
         }
 
         Cmd::Kv(kv_cmd) => {

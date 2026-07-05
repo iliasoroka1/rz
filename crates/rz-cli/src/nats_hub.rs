@@ -298,6 +298,11 @@ pub fn subscribe_and_deliver(agent_name: &str, delivery: &str) -> Result<()> {
                     Ok(()) => {
                         eprintln!("rz: jetstream consumer ended for '{agent_name}', reconnecting in 2s...");
                     }
+                    Err(e) if e.to_string().starts_with("FATAL_DELIVERY") => {
+                        // Delivery is permanently broken — exit so the
+                        // registry entry is removed and routing heals.
+                        return Err(e);
+                    }
                     Err(e) => {
                         eprintln!("rz: jetstream consume error for '{agent_name}': {e}, retrying in 2s...");
                     }
@@ -310,6 +315,9 @@ pub fn subscribe_and_deliver(agent_name: &str, delivery: &str) -> Result<()> {
             match core_subscribe(&client, agent_name, delivery).await {
                 Ok(()) => {
                     eprintln!("rz: core subscription ended for '{agent_name}', reconnecting in 2s...");
+                }
+                Err(e) if e.to_string().starts_with("FATAL_DELIVERY") => {
+                    return Err(e);
                 }
                 Err(e) => {
                     eprintln!("rz: core subscribe error for '{agent_name}': {e}, retrying in 2s...");
@@ -355,6 +363,7 @@ async fn jetstream_consume(
         .await
         .map_err(|e| eyre::eyre!("consumer messages: {e}"))?;
 
+    let mut consecutive_failures = 0u32;
     while let Some(msg) = messages.next().await {
         let msg = match msg {
             Ok(m) => m,
@@ -377,9 +386,18 @@ async fn jetstream_consume(
 
         if let Err(e) = deliver_locally(delivery, &envelope) {
             eprintln!("rz: nats: delivery error: {e}");
+            // A listener that can never deliver (e.g. detached from the cmux
+            // socket) must die rather than sit on the durable consumer: its
+            // exit deregisters it, so senders fall back to a working route
+            // and un-acked messages redeliver to the next listener.
+            consecutive_failures += 1;
+            if consecutive_failures >= 5 {
+                bail!("FATAL_DELIVERY: {} consecutive delivery failures, last: {e}", consecutive_failures);
+            }
             // Don't ack — will be redelivered
             continue;
         }
+        consecutive_failures = 0;
 
         // Ack after successful delivery
         if let Err(e) = msg.ack().await {
@@ -415,6 +433,7 @@ async fn core_subscribe(
         "rz: listening (core nats, non-durable) for agent '{agent_name}'"
     );
 
+    let mut consecutive_failures = 0u32;
     while let Some(msg) = futures::StreamExt::next(&mut subscriber).await {
         let payload = std::str::from_utf8(&msg.payload).unwrap_or_default();
         let envelope = match Envelope::decode(payload) {
@@ -427,6 +446,12 @@ async fn core_subscribe(
 
         if let Err(e) = deliver_locally(delivery, &envelope) {
             eprintln!("rz: nats: delivery error: {e}");
+            consecutive_failures += 1;
+            if consecutive_failures >= 5 {
+                bail!("FATAL_DELIVERY: {consecutive_failures} consecutive delivery failures, last: {e}");
+            }
+        } else {
+            consecutive_failures = 0;
         }
 
         if delivery.starts_with("cmux:") || delivery.starts_with("zellij:") || delivery.starts_with("tmux:") {
