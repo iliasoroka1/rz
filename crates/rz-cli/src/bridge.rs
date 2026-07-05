@@ -29,6 +29,7 @@ pub fn run_bridge(name: &str, webhook: &str, port: u16, permanent: bool) -> Resu
         permanent,
         registered_at: now_ms,
         last_seen: now_ms,
+        host: crate::registry::local_host(),
     };
     crate::registry::register(entry.clone())?;
     let _ = crate::registry::nats_register(&entry);
@@ -83,7 +84,7 @@ pub fn run_bridge(name: &str, webhook: &str, port: u16, permanent: bool) -> Resu
                     rz_agent_protocol::MessageKind::Chat { text },
                 ).with_to(&to);
                 if let Ok(wire) = envelope.encode() {
-                    let subject = format!("agent.{to}");
+                    let subject = crate::nats_hub::subject(&to);
                     let _ = client.publish(
                         async_nats::Subject::from(subject),
                         wire.into(),
@@ -182,11 +183,16 @@ pub fn run_bridge(name: &str, webhook: &str, port: u16, permanent: bool) -> Resu
             .await
             .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
 
-        let subject = format!("agent.{inbound_name}");
+        let subject = crate::nats_hub::subject(&inbound_name);
 
         // Try JetStream first
         let js = async_nats::jetstream::new(client.clone());
-        let stream_name = format!("RZ_{}", inbound_name.replace('.', "_").replace('-', "_"));
+        let stream_name = crate::nats_hub::stream_name(&inbound_name);
+
+        // Create the stream if it doesn't exist yet — otherwise a bridge that
+        // starts before any message is published silently falls back to
+        // non-durable core NATS.
+        let _ = crate::nats_hub::ensure_stream(&js, &inbound_name).await;
 
         if let Ok(stream) = js.get_stream(&stream_name).await {
             use async_nats::jetstream::consumer;

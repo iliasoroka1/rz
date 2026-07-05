@@ -1,98 +1,11 @@
-//! Transport abstraction layer for routing messages.
+//! HTTP delivery for registered `http` transport agents.
 //!
-//! Supports three backends:
-//! - **Cmux** — sends via cmux surface (the default, wraps `cmux::send`)
-//! - **File** — writes envelope JSON to a file-based mailbox
-//! - **Http** — POSTs envelope JSON to a remote endpoint (shells out to curl)
+//! POSTs envelope JSON to `<base_url>/rz/inbox` (shells out to curl).
+//! Other transports are handled directly: cmux via [`crate::cmux::send`],
+//! file via [`crate::mailbox::deliver`], NATS via [`crate::nats_hub::publish`].
 
 use eyre::{bail, Result};
 use rz_agent_protocol::Envelope;
-use std::fs;
-use std::path::PathBuf;
-
-use crate::cmux;
-
-/// Available transport backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    Cmux,
-    File,
-    Http,
-    
-    Nats,
-}
-
-/// Parse a transport type string into a `Transport` variant.
-pub fn parse_transport(s: &str) -> Result<Transport> {
-    match s.to_lowercase().as_str() {
-        "cmux" => Ok(Transport::Cmux),
-        "file" => Ok(Transport::File),
-        "http" | "https" => Ok(Transport::Http),
-        
-        "nats" => Ok(Transport::Nats),
-        other => bail!("unknown transport type: '{}' (expected cmux, file, or http)", other),
-    }
-}
-
-/// Deliver an envelope via the given transport.
-///
-/// The meaning of `endpoint` depends on the transport:
-/// - `Cmux` — the target surface ID
-/// - `File` — the agent name (mailbox written to `~/.rz/mailboxes/<name>/inbox/`)
-/// - `Http` — the base URL (envelope POSTed to `<url>/rz/inbox`)
-pub fn deliver(transport: &Transport, endpoint: &str, envelope: &Envelope) -> Result<()> {
-    match transport {
-        Transport::Cmux => deliver_cmux(endpoint, envelope),
-        Transport::File => deliver_file(endpoint, envelope),
-        Transport::Http => deliver_http(endpoint, envelope),
-        
-        Transport::Nats => deliver_nats(endpoint, envelope),
-    }
-}
-
-/// High-level send: parse transport type, then deliver.
-pub fn send_message(
-    _name: &str,
-    endpoint: &str,
-    transport_type: &str,
-    envelope: &Envelope,
-) -> Result<()> {
-    let transport = parse_transport(transport_type)?;
-    deliver(&transport, endpoint, envelope)
-}
-
-// ── Cmux ────────────────────────────────────────────────────────────────
-
-fn deliver_cmux(surface_id: &str, envelope: &Envelope) -> Result<()> {
-    let wire = envelope.encode()?;
-    cmux::send(surface_id, &wire)
-}
-
-// ── File ────────────────────────────────────────────────────────────────
-
-fn mailbox_dir(name: &str) -> Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| eyre::eyre!("HOME not set"))?;
-    Ok(PathBuf::from(home).join(".rz").join("mailboxes").join(name).join("inbox"))
-}
-
-fn deliver_file(agent_name: &str, envelope: &Envelope) -> Result<()> {
-    let dir = mailbox_dir(agent_name)?;
-    fs::create_dir_all(&dir)?;
-
-    let filename = format!("{}_{}.json", envelope.ts, envelope.id);
-    let path = dir.join(filename);
-
-    let json = serde_json::to_string_pretty(envelope)?;
-    fs::write(&path, json)?;
-    Ok(())
-}
-
-
-fn deliver_nats(endpoint: &str, envelope: &Envelope) -> Result<()> {
-    crate::nats_hub::publish(endpoint, envelope)
-}
-
-// ── Http ────────────────────────────────────────────────────────────────
 
 pub fn deliver_http(base_url: &str, envelope: &Envelope) -> Result<()> {
     let url = format!("{}/rz/inbox", base_url.trim_end_matches('/'));
@@ -120,21 +33,4 @@ pub fn deliver_http(base_url: &str, envelope: &Envelope) -> Result<()> {
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_transport() {
-        assert_eq!(parse_transport("cmux").unwrap(), Transport::Cmux);
-        assert_eq!(parse_transport("CMUX").unwrap(), Transport::Cmux);
-        assert_eq!(parse_transport("file").unwrap(), Transport::File);
-        assert_eq!(parse_transport("http").unwrap(), Transport::Http);
-        assert_eq!(parse_transport("https").unwrap(), Transport::Http);
-        
-        assert_eq!(parse_transport("nats").unwrap(), Transport::Nats);
-        assert!(parse_transport("tcp").is_err());
-    }
 }

@@ -74,6 +74,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
         permanent,
         registered_at: now_ms,
         last_seen: now_ms,
+        host: crate::registry::local_host(),
     };
     crate::registry::register(entry.clone())
         .wrap_err("failed to register agent")?;
@@ -141,13 +142,21 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
         original: original_termios,
     };
 
-    // Phase 5: Bootstrap — send identity and instructions after child loads.
+    // Readiness signal: set by the I/O loop when the child first writes
+    // output. Bootstrap/subscriber gate on this instead of fixed sleeps,
+    // so fast-starting agents aren't kept waiting and slow ones aren't
+    // bootstrapped before they can read.
+    let output_seen = std::sync::Arc::new(AtomicBool::new(false));
+
+    // Phase 5: Bootstrap — send identity and instructions once the child
+    // shows life (max 15s), plus a short settle for its UI to come up.
     let bootstrap_name = name.to_string();
     let bootstrap_master = master_raw;
     let send_bootstrap = !no_bootstrap;
+    let bootstrap_ready = output_seen.clone();
     std::thread::spawn(move || {
-        // Wait for child to fully load before sending bootstrap.
-        std::thread::sleep(Duration::from_secs(10));
+        wait_for_flag(&bootstrap_ready, Duration::from_secs(15));
+        std::thread::sleep(Duration::from_secs(2));
         if send_bootstrap {
             if let Ok(msg) = crate::bootstrap::build_pty(&bootstrap_name) {
                 let _ = write_all_fd(bootstrap_master, msg.as_bytes());
@@ -162,10 +171,12 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
     let (msg_tx, msg_rx) = mpsc::channel::<Envelope>();
 
     let nats_name = name.to_string();
+    let subscriber_ready = output_seen.clone();
     if crate::nats_hub::hub_url().is_some() {
         std::thread::spawn(move || {
-            // Delay before subscribing — give the child time to start.
-            std::thread::sleep(Duration::from_secs(10));
+            // Subscribe once the child shows life — messages queue in the
+            // channel until the I/O loop injects them.
+            wait_for_flag(&subscriber_ready, Duration::from_secs(15));
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -191,13 +202,17 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
                     }
                 };
 
-                let subject = format!("agent.{nats_name}");
+                let subject = crate::nats_hub::subject(&nats_name);
 
                 // Try JetStream first
                 let js = async_nats::jetstream::new(client.clone());
-                let stream_name =
-                    format!("RZ_{}", nats_name.replace('.', "_").replace('-', "_"));
-                let consumer_name = format!("rz_{nats_name}");
+                let stream_name = crate::nats_hub::stream_name(&nats_name);
+                let consumer_name = crate::nats_hub::consumer_name(&nats_name);
+
+                // Create the stream if it doesn't exist yet — otherwise an agent
+                // that starts before anyone messages it silently falls back to
+                // non-durable core NATS.
+                let _ = crate::nats_hub::ensure_stream(&js, &nats_name).await;
 
                 if let Ok(stream) = js.get_stream(&stream_name).await {
                     use async_nats::jetstream::consumer;
@@ -333,6 +348,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
                 match nix::unistd::read(master_raw, &mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        output_seen.store(true, Ordering::Relaxed);
                         let _ = write_all_fd(stdout_fd, &buf[..n]);
                     }
                     Err(nix::errno::Errno::EIO) => break,
@@ -363,7 +379,7 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
                 std::thread::sleep(Duration::from_millis(100));
                 let _ = write_all_fd(master_raw, b"\r");
                 // Wait for the TUI to process before injecting next message
-                std::thread::sleep(Duration::from_millis(1500));
+                std::thread::sleep(Duration::from_millis(crate::nats_hub::pace_ms()));
             }
         }
     }
@@ -379,6 +395,14 @@ pub fn run_agent(name: &str, command: &[String], no_bootstrap: bool, permanent: 
     let _ = waitpid(child_pid, None);
 
     Ok(())
+}
+
+/// Block until `flag` becomes true or `max` elapses (200ms poll).
+fn wait_for_flag(flag: &AtomicBool, max: Duration) {
+    let deadline = std::time::Instant::now() + max;
+    while !flag.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// Write all bytes to a raw fd, retrying on partial writes.

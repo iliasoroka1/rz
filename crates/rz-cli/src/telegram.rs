@@ -42,7 +42,7 @@ impl TelegramBridge {
     }
 
     fn own_subject(&self) -> String {
-        format!("agent.{}", self.name)
+        crate::nats_hub::subject(&self.name)
     }
 
     fn from_identity(&self) -> String {
@@ -108,7 +108,7 @@ impl TelegramBridge {
 
                             // Route: @agent prefix or default target.
                             let (target_agent, text) = parse_target(&parsed.text, &self.default_agent);
-                            let target_subject = format!("agent.{target_agent}");
+                            let target_subject = crate::nats_hub::subject(target_agent);
 
                             // Build envelope.
                             let mut envelope = Envelope::chat(
@@ -135,7 +135,7 @@ impl TelegramBridge {
                             // Ensure stream exists, then publish.
                             let js = async_nats::jetstream::new(nats_client.clone());
                             let target_agent_name = target_agent.to_string();
-                            let stream_name = format!("RZ_{}", target_agent_name.replace('.', "_").replace('-', "_"));
+                            let stream_name = crate::nats_hub::stream_name(&target_agent_name);
                             let _ = js.get_or_create_stream(async_nats::jetstream::stream::Config {
                                 name: stream_name,
                                 subjects: vec![target_subject.clone()],

@@ -30,10 +30,41 @@ pub struct AgentEntry {
     pub registered_at: u64,
     /// Unix epoch milliseconds, updated by heartbeat.
     pub last_seen: u64,
+    /// Hostname of the machine the agent runs on. Lets resolvers pid-check
+    /// `pty-<pid>`/`listen-<pid>` entries only when they are local.
+    /// Empty on entries written by older versions (treated as local).
+    #[serde(default)]
+    pub host: String,
+}
+
+/// This machine's hostname (cached). Empty string if it can't be determined.
+pub fn local_host() -> String {
+    use std::sync::OnceLock;
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    })
+    .clone()
+}
+
+/// Return `true` if the entry was registered from this machine (or predates
+/// the `host` field, in which case we assume local).
+pub fn is_local(entry: &AgentEntry) -> bool {
+    entry.host.is_empty() || entry.host == local_host()
 }
 
 /// Max inactivity before a non-permanent agent is pruned (10 minutes).
 const STALE_THRESHOLD_MS: u64 = 10 * 60 * 1000;
+
+/// Return `true` if a non-permanent entry hasn't been seen within the stale
+/// threshold. Permanent entries are never stale.
+pub fn is_stale(entry: &AgentEntry, now_ms: u64) -> bool {
+    !entry.permanent && now_ms.saturating_sub(entry.last_seen) > STALE_THRESHOLD_MS
+}
 
 /// Return the path to the registry file (`~/.rz/registry.json`).
 pub fn registry_path() -> PathBuf {
@@ -73,30 +104,35 @@ pub fn save(registry: &HashMap<String, AgentEntry>) -> Result<()> {
     Ok(())
 }
 
-/// Register (or update) an agent entry.
+/// Register (or update) an agent entry. Keys are session-scoped so
+/// identically-named agents in different sessions coexist in one file.
 pub fn register(entry: AgentEntry) -> Result<()> {
     let mut reg = load()?;
-    reg.insert(entry.name.clone(), entry);
+    reg.insert(crate::session::scoped_key(&entry.name), entry);
     save(&reg)
 }
 
-/// Remove an agent by name.
+/// Remove an agent by name (current session only).
 pub fn deregister(name: &str) -> Result<()> {
     let mut reg = load()?;
-    reg.remove(name);
+    reg.remove(&crate::session::scoped_key(name));
     save(&reg)
 }
 
-/// Look up an agent by name.
+/// Look up an agent by name (current session only).
 pub fn lookup(name: &str) -> Result<Option<AgentEntry>> {
     let reg = load()?;
-    Ok(reg.get(name).cloned())
+    Ok(reg.get(&crate::session::scoped_key(name)).cloned())
 }
 
-/// Return all registered agents.
+/// Return all agents registered in the current session.
 pub fn list_all() -> Result<Vec<AgentEntry>> {
     let reg = load()?;
-    Ok(reg.into_values().collect())
+    Ok(reg
+        .into_iter()
+        .filter(|(k, _)| crate::session::unscope_key(k).is_some())
+        .map(|(_, v)| v)
+        .collect())
 }
 
 /// Remove entries whose `last_seen` is older than `max_age_secs` seconds ago.
@@ -119,10 +155,10 @@ pub fn cleanup_stale(max_age_secs: u64) -> Result<usize> {
     Ok(removed)
 }
 
-/// Update `last_seen` to now for the given agent name.
+/// Update `last_seen` to now for the given agent name (current session).
 pub fn touch(name: &str) -> Result<()> {
     let mut reg = load()?;
-    if let Some(entry) = reg.get_mut(name) {
+    if let Some(entry) = reg.get_mut(&crate::session::scoped_key(name)) {
         entry.last_seen = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -130,6 +166,46 @@ pub fn touch(name: &str) -> Result<()> {
         save(&reg)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(permanent: bool, last_seen: u64) -> AgentEntry {
+        AgentEntry {
+            name: "t".into(),
+            id: "listen-1".into(),
+            transport: "nats".into(),
+            endpoint: "t".into(),
+            capabilities: vec![],
+            permanent,
+            registered_at: last_seen,
+            host: String::new(),
+            last_seen,
+        }
+    }
+
+    #[test]
+    fn fresh_entry_is_not_stale() {
+        let now = 10 * 60 * 1000;
+        assert!(!is_stale(&entry(false, now - 1000), now));
+        // Exactly at the threshold is still fresh.
+        assert!(!is_stale(&entry(false, 0), STALE_THRESHOLD_MS));
+    }
+
+    #[test]
+    fn old_entry_is_stale_unless_permanent() {
+        let now = STALE_THRESHOLD_MS + 1;
+        assert!(is_stale(&entry(false, 0), now));
+        assert!(!is_stale(&entry(true, 0), now));
+    }
+
+    #[test]
+    fn clock_skew_does_not_underflow() {
+        // last_seen in the future (clock skew) must not panic or mark stale.
+        assert!(!is_stale(&entry(false, u64::MAX), 0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,23 +237,20 @@ async fn nats_kv_store(
 /// Register an agent in the NATS KV bucket `rz-agents`.
 /// If `RZ_HUB` is not set, returns `Ok(())` silently.
 pub fn nats_register(entry: &AgentEntry) -> Result<()> {
-    let url = match crate::nats_hub::hub_url() {
-        Some(u) => u,
-        None => return Ok(()),
-    };
+    if crate::nats_hub::hub_url().is_none() {
+        return Ok(());
+    }
     let json = serde_json::to_string(entry)?;
+    let client = crate::nats_hub::client()?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = async_nats::connect(&url)
-            .await
-            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+    crate::nats_hub::runtime().block_on(async {
         let js = async_nats::jetstream::new(client);
         let store = nats_kv_store(&js).await?;
         store
-            .put(&entry.name, json.into_bytes().into())
+            .put(
+                &crate::session::scoped_key(&entry.name),
+                json.into_bytes().into(),
+            )
             .await
             .map_err(|e| eyre::eyre!("NATS KV put failed: {e}"))?;
         Ok::<(), eyre::Report>(())
@@ -188,22 +261,16 @@ pub fn nats_register(entry: &AgentEntry) -> Result<()> {
 /// Remove an agent from the NATS KV bucket `rz-agents`.
 /// If `RZ_HUB` is not set, returns `Ok(())` silently.
 pub fn nats_deregister(name: &str) -> Result<()> {
-    let url = match crate::nats_hub::hub_url() {
-        Some(u) => u,
-        None => return Ok(()),
-    };
+    if crate::nats_hub::hub_url().is_none() {
+        return Ok(());
+    }
+    let client = crate::nats_hub::client()?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = async_nats::connect(&url)
-            .await
-            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+    crate::nats_hub::runtime().block_on(async {
         let js = async_nats::jetstream::new(client);
         let store = nats_kv_store(&js).await?;
         // Delete returns an error if key doesn't exist; ignore it.
-        let _ = store.delete(name).await;
+        let _ = store.delete(&crate::session::scoped_key(name)).await;
         Ok::<(), eyre::Report>(())
     })?;
     Ok(())
@@ -212,18 +279,12 @@ pub fn nats_deregister(name: &str) -> Result<()> {
 /// List all agents from the NATS KV bucket `rz-agents`.
 /// If `RZ_HUB` is not set or bucket doesn't exist, returns an empty vec.
 pub fn nats_list() -> Result<Vec<AgentEntry>> {
-    let url = match crate::nats_hub::hub_url() {
-        Some(u) => u,
-        None => return Ok(Vec::new()),
-    };
+    if crate::nats_hub::hub_url().is_none() {
+        return Ok(Vec::new());
+    }
+    let client = crate::nats_hub::client()?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = async_nats::connect(&url)
-            .await
-            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+    crate::nats_hub::runtime().block_on(async {
         let js = async_nats::jetstream::new(client);
         let store = match js.get_key_value(NATS_KV_BUCKET).await {
             Ok(s) => s,
@@ -248,13 +309,17 @@ pub fn nats_list() -> Result<Vec<AgentEntry>> {
                 Ok(k) => k,
                 Err(_) => continue,
             };
+            // Only surface agents from our own session.
+            if crate::session::unscope_key(&key).is_none() {
+                continue;
+            }
             if let Ok(Some(kv_entry)) = store.get(&key).await {
                 if let Ok(agent) =
                     serde_json::from_slice::<AgentEntry>(&kv_entry)
                 {
                     // Prune stale non-permanent agents.
-                    if !agent.permanent && now_ms.saturating_sub(agent.last_seen) > STALE_THRESHOLD_MS {
-                        to_prune.push(agent.name.clone());
+                    if is_stale(&agent, now_ms) {
+                        to_prune.push(key);
                         continue;
                     }
                     entries.push(agent);
@@ -262,8 +327,8 @@ pub fn nats_list() -> Result<Vec<AgentEntry>> {
             }
         }
         // Clean up stale entries.
-        for name in &to_prune {
-            let _ = store.delete(name).await;
+        for key in &to_prune {
+            let _ = store.delete(key).await;
         }
         Ok(entries)
     })
@@ -272,37 +337,30 @@ pub fn nats_list() -> Result<Vec<AgentEntry>> {
 /// Look up a single agent by name from the NATS KV bucket.
 /// If `RZ_HUB` is not set or key not found, returns `None`.
 pub fn nats_lookup(name: &str) -> Result<Option<AgentEntry>> {
-    let url = match crate::nats_hub::hub_url() {
-        Some(u) => u,
-        None => return Ok(None),
-    };
+    if crate::nats_hub::hub_url().is_none() {
+        return Ok(None);
+    }
+    let client = crate::nats_hub::client()?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = async_nats::connect(&url)
-            .await
-            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+    crate::nats_hub::runtime().block_on(async {
         let js = async_nats::jetstream::new(client);
         let store = match js.get_key_value(NATS_KV_BUCKET).await {
             Ok(s) => s,
             Err(_) => return Ok(None),
         };
-        match store.get(name).await {
+        let key = crate::session::scoped_key(name);
+        match store.get(&key).await {
             Ok(Some(value)) => {
                 let agent = serde_json::from_slice::<AgentEntry>(&value)
                     .map_err(|e| eyre::eyre!("NATS KV deserialize failed: {e}"))?;
                 // Prune stale non-permanent agents.
-                if !agent.permanent {
-                    let now_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    if now_ms.saturating_sub(agent.last_seen) > STALE_THRESHOLD_MS {
-                        let _ = store.delete(name).await;
-                        return Ok(None);
-                    }
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if is_stale(&agent, now_ms) {
+                    let _ = store.delete(&key).await;
+                    return Ok(None);
                 }
                 Ok(Some(agent))
             }
@@ -314,28 +372,22 @@ pub fn nats_lookup(name: &str) -> Result<Option<AgentEntry>> {
 /// Re-put an agent entry with updated `last_seen` to keep it alive.
 /// If `RZ_HUB` is not set, returns `Ok(())` silently.
 pub fn nats_heartbeat(name: &str, entry: &AgentEntry) -> Result<()> {
-    let url = match crate::nats_hub::hub_url() {
-        Some(u) => u,
-        None => return Ok(()),
-    };
+    if crate::nats_hub::hub_url().is_none() {
+        return Ok(());
+    }
     let mut refreshed = entry.clone();
     refreshed.last_seen = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     let json = serde_json::to_string(&refreshed)?;
+    let client = crate::nats_hub::client()?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = async_nats::connect(&url)
-            .await
-            .map_err(|e| eyre::eyre!("NATS connect failed: {e}"))?;
+    crate::nats_hub::runtime().block_on(async {
         let js = async_nats::jetstream::new(client);
         let store = nats_kv_store(&js).await?;
         store
-            .put(name, json.into_bytes().into())
+            .put(&crate::session::scoped_key(name), json.into_bytes().into())
             .await
             .map_err(|e| eyre::eyre!("NATS KV heartbeat put failed: {e}"))?;
         Ok::<(), eyre::Report>(())

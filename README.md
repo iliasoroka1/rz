@@ -87,22 +87,24 @@ JetStream stores messages while the agent is offline. On restart with the same n
 
 ### Cross-machine
 
-Agents on different machines, different multiplexers, different languages — all talk through NATS:
+Agents on different machines, different multiplexers, different languages — all talk through NATS.
+Subjects are scoped by session (`RZ_SESSION` > `CMUX_WORKSPACE_ID` > `ZELLIJ_SESSION_NAME` > `default`),
+so agents only see each other when they share a session — set `RZ_SESSION` explicitly to span machines:
 
 ```bash
 # Machine A (tmux) — terminal agent
-export RZ_HUB=nats://nats.example.com:4222
+export RZ_HUB=nats://nats.example.com:4222 RZ_SESSION=team-alpha
 rz run --name worker claude --dangerously-skip-permissions
 
 # Machine B (plain terminal) — another terminal agent
-export RZ_HUB=nats://nats.example.com:4222
+export RZ_HUB=nats://nats.example.com:4222 RZ_SESSION=team-alpha
 rz agent --name reviewer -- gemini
 
 # Machine C — HTTP service via bridge
-export RZ_HUB=nats://nats.example.com:4222
+export RZ_HUB=nats://nats.example.com:4222 RZ_SESSION=team-alpha
 rz bridge --name api-bot --webhook http://localhost:7070/inbox
 
-# Any machine — send to any agent
+# Any machine in the session — send to any agent
 rz send worker "implement feature X"
 rz send api-bot "process batch 42"
 ```

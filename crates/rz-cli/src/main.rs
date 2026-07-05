@@ -111,6 +111,10 @@ enum Cmd {
         /// Block until a reply arrives (timeout in seconds).
         #[arg(long)]
         wait: Option<u64>,
+        /// Publish to NATS even if no live listener is found.
+        /// The message is stored durably and delivered when the agent reconnects.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Show all agents (local panes + registry + NATS KV).
@@ -625,12 +629,17 @@ enum Cmd {
 
 }
 
-/// Path to the name→UUID registry file.
+/// Path to the name→UUID registry file, scoped by session so a process
+/// with an `RZ_SESSION` override can't resolve another session's names.
 fn names_path() -> Option<std::path::PathBuf> {
-    let ws = workspace_path().ok()?;
-    // Ensure the workspace directory exists so names.json can always be written.
-    let _ = std::fs::create_dir_all(&ws);
-    Some(ws.join("names.json"))
+    let sid = rz_cli::session::session_id();
+    let sanitized: String = sid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dir = std::path::PathBuf::from(format!("/tmp/rz-session-{sanitized}"));
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("names.json"))
 }
 
 /// Load the name→UUID map from disk.
@@ -671,31 +680,58 @@ fn is_uuid(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Check whether a local process is alive via `kill -0`.
+fn process_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Decide whether a registry entry points at a dead agent.
+///
+/// PTY agents and listeners carry their pid ("pty-<pid>" / "listen-<pid>"),
+/// so local ones can be liveness-checked directly — this catches `kill -9`'d
+/// listeners immediately instead of waiting out the staleness window.
+/// Everything else falls back to the last_seen threshold.
+fn entry_is_dead(entry: &rz_cli::registry::AgentEntry) -> bool {
+    let pid = entry
+        .id
+        .strip_prefix("pty-")
+        .or_else(|| entry.id.strip_prefix("listen-"));
+    match pid {
+        Some(pid_str) if rz_cli::registry::is_local(entry) => !process_alive(pid_str),
+        _ => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            rz_cli::registry::is_stale(entry, now_ms)
+        }
+    }
+}
+
 fn resolve_target(target: &str) -> Result<Target> {
-    // 1. Universal registry — check and prune dead PTY agents
+    // 1. Universal registry — prune dead or stale entries before trusting them.
     if let Ok(Some(entry)) = rz_cli::registry::lookup(target) {
-        // Verify PTY agents are still alive (id = "pty-<pid>").
-        if let Some(pid_str) = entry.id.strip_prefix("pty-") {
-            let alive = std::process::Command::new("kill")
-                .args(["-0", pid_str])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !alive {
-                let _ = rz_cli::registry::deregister(target);
-                // Fall through to other resolution methods.
-            } else {
-                return registry_target(&entry);
-            }
+        if entry_is_dead(&entry) {
+            let _ = rz_cli::registry::deregister(target);
+            // Fall through to other resolution methods.
         } else {
             return registry_target(&entry);
         }
     }
-    // 1b. NATS KV registry
+    // 1b. NATS KV registry — same treatment; a SIGKILL'd listener never
+    // deregisters itself, so a blind hit here would black-hole messages.
     if let Ok(Some(entry)) = rz_cli::registry::nats_lookup(target) {
-        return registry_target(&entry);
+        if entry_is_dead(&entry) {
+            let _ = rz_cli::registry::nats_deregister(target);
+        } else {
+            return registry_target(&entry);
+        }
     }
 
     // 2. cmux/zellij/tmux names
@@ -715,9 +751,13 @@ fn resolve_target(target: &str) -> Result<Target> {
             }
         }
     }
-    // 5. NATS fallback
+    // 5. Nothing matched. Publishing blindly to NATS here would durably store
+    //    a message no consumer will ever read — fail loudly instead.
     if rz_cli::nats_hub::hub_url().is_some() {
-        return Ok(Target::Nats(target.to_string()));
+        return Err(eyre::eyre!(
+            "unknown agent '{target}' — no live listener found (checked registry, NATS KV, names, surfaces).\n\
+             If the agent is temporarily offline, use `rz send {target} <msg> --force` to store the message on NATS until it reconnects."
+        ));
     }
     Err(eyre::eyre!("unknown agent '{}' — use a UUID, a name from `rz run --name`, or `rz register`", target))
 }
@@ -733,10 +773,24 @@ fn registry_target(entry: &rz_cli::registry::AgentEntry) -> Result<Target> {
 
 /// Legacy resolver — returns surface ID string for commands that only support cmux.
 fn resolve_target_cmux(target: &str) -> Result<String> {
-    match resolve_target(target)? {
-        Target::Cmux(id) => Ok(id),
-        _ => Err(eyre::eyre!("agent '{}' is not a cmux terminal", target)),
+    if let Ok(Target::Cmux(id)) = resolve_target(target) {
+        return Ok(id);
     }
+    // An agent spawned by `rz run` is both a NATS listener (registry) and a
+    // local pane (names.json). The registry entry wins in resolve_target, so
+    // pane-only commands (logs/kill) must fall back to the pane mapping.
+    let names = load_names();
+    if let Some(id) = names.get(target) {
+        return Ok(id.clone());
+    }
+    if let Ok(surfaces) = cmux::list_surfaces() {
+        for s in &surfaces {
+            if s.title.eq_ignore_ascii_case(target) || s.title.contains(target) {
+                return Ok(s.id.clone());
+            }
+        }
+    }
+    Err(eyre::eyre!("agent '{}' is not a cmux terminal", target))
 }
 
 fn rz_path() -> String {
@@ -761,6 +815,22 @@ fn workspace_path() -> Result<std::path::PathBuf> {
 /// `deliver` should be "cmux:<surface_id>" or "zellij:<pane_id>".
 /// Uses a pidfile to avoid duplicate listeners for the same agent name.
 fn spawn_nats_listener(rz_path: &str, agent_name: &str, deliver: &str) {
+    // If a live listener for this name is already registered (e.g. one the
+    // user started themselves), don't spawn a competing one — two consumers
+    // on the same durable split the message stream.
+    if let Ok(Some(e)) = rz_cli::registry::lookup(agent_name) {
+        if e.transport == "nats" {
+            let alive = e
+                .id
+                .strip_prefix("listen-")
+                .map(process_alive)
+                .unwrap_or(false);
+            if alive {
+                return;
+            }
+        }
+    }
+
     // Pidfile prevents duplicate listeners per agent name per workspace.
     let session = std::env::var("CMUX_WORKSPACE_ID")
         .or_else(|_| std::env::var("ZELLIJ_SESSION_NAME"))
@@ -789,11 +859,24 @@ fn spawn_nats_listener(rz_path: &str, agent_name: &str, deliver: &str) {
         }
     }
 
+    // Log to a file instead of /dev/null — cmux delivery failures (e.g.
+    // socket access denied for detached processes) are invisible otherwise.
+    let log_dir = dirs_path("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log = std::fs::File::create(log_dir.join(format!("listen-{agent_name}.log"))).ok();
+    let (out, err) = match log {
+        Some(f) => (
+            f.try_clone().map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()),
+            std::process::Stdio::from(f),
+        ),
+        None => (std::process::Stdio::null(), std::process::Stdio::null()),
+    };
+
     match std::process::Command::new(rz_path)
         .args(["listen", agent_name, "--deliver", deliver])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
     {
         Ok(child) => {
@@ -855,6 +938,23 @@ fn sender_name() -> String {
     std::env::var("RZ_AGENT_NAME").unwrap_or_else(|_| sender_id(None))
 }
 
+/// Wait for a reply referencing `msg_id`, wherever it can arrive.
+/// In cmux, poll our own scrollback (catches both cmux-pasted and
+/// listener-delivered replies). Headless, watch our own NATS subject.
+fn wait_for_reply_any(msg_id: &str, timeout_secs: u64) -> Result<()> {
+    if cmux::own_surface_id().is_ok() {
+        return wait_for_reply(msg_id, timeout_secs);
+    }
+    let me = sender_name();
+    let reply = rz_cli::nats_hub::wait_for_ref(
+        &me,
+        msg_id,
+        std::time::Duration::from_secs(timeout_secs),
+    )?;
+    println!("{}", log::format_message(&reply, None));
+    Ok(())
+}
+
 /// Parse key=value pairs into a JSON object.
 /// Values that look like numbers become numbers, "true"/"false" become bools.
 fn parse_kv_body(args: &[String]) -> serde_json::Value {
@@ -888,8 +988,8 @@ fn publish_structured(target_name: &str, from: &str, kind_name: &str, body: serd
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-    let id = format!("{:04x}{:04x}", (ts & 0xFFFF) as u16, seq);
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let id = rz_agent_protocol::message_id(ts, seq as u32);
 
     let envelope = serde_json::json!({
         "id": id,
@@ -1004,9 +1104,37 @@ _Fill in the session's primary objective._
                             let listen_cmd = format!(
                                 "{rz} listen {n} --deliver {prefix}:{surface_id} &>/dev/null &",
                             );
-                            cmux::send(&surface_id, &listen_cmd)?;
-                            // Brief pause to let the background job start
-                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            // The pane's shell may still be initializing and
+                            // swallow the typed command. Listeners register
+                            // themselves, so verify registration and retry
+                            // once instead of trusting a fixed sleep.
+                            let mut listener_up = false;
+                            'attempts: for attempt in 0..2 {
+                                if attempt > 0 {
+                                    eprintln!("rz: listener for '{n}' not up yet, retyping...");
+                                }
+                                cmux::send(&surface_id, &listen_cmd)?;
+                                for _ in 0..10 {
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    if let Ok(Some(e)) = rz_cli::registry::lookup(n) {
+                                        let alive = e
+                                            .id
+                                            .strip_prefix("listen-")
+                                            .map(process_alive)
+                                            .unwrap_or(false);
+                                        if alive {
+                                            listener_up = true;
+                                            break 'attempts;
+                                        }
+                                    }
+                                }
+                            }
+                            if !listener_up {
+                                eprintln!(
+                                    "rz: warning: could not verify listener for '{n}' — \
+                                     inbound NATS messages may not reach it"
+                                );
+                            }
                         }
                         // Also start listener for lead (own pane)
                         let rz = rz_path();
@@ -1027,12 +1155,29 @@ _Fill in the session's primary objective._
                 if !no_bootstrap {
                     be.wait_for_ready(&surface_id, wait, 5);
 
-                    let msg = bootstrap::build(&surface_id, name.as_deref(), be.as_ref())?;
+                    // A listener was typed into the pane's shell above whenever
+                    // NATS is configured and the agent has a name.
+                    let listener_running =
+                        rz_cli::nats_hub::hub_url().is_some() && name.is_some();
+                    let msg = bootstrap::build(
+                        &surface_id,
+                        name.as_deref(),
+                        be.as_ref(),
+                        listener_running,
+                    )?;
                     be.send(&surface_id, &msg)?;
 
                     if let Some(task) = prompt {
                         be.wait_for_ready(&surface_id, 30, 3);
-                        be.send(&surface_id, &task)?;
+                        // Send the task as an @@RZ envelope, not plain text —
+                        // the agent needs sender attribution to distinguish
+                        // agent traffic from a human typing in its terminal.
+                        let envelope = Envelope::new(
+                            sender_id(None),
+                            MessageKind::Chat { text: task },
+                        )
+                        .with_to(name.as_deref().unwrap_or(&surface_id));
+                        be.send(&surface_id, &envelope.encode()?)?;
                     }
                 }
 
@@ -1093,8 +1238,15 @@ _Fill in the session's primary objective._
             }
         }
 
-        Cmd::Send { pane, message, raw, from, r#ref, wait } => {
-            let target = resolve_target(&pane)?;
+        Cmd::Send { pane, message, raw, from, r#ref, wait, force } => {
+            let target = if force {
+                if rz_cli::nats_hub::hub_url().is_none() {
+                    bail!("--force requires RZ_HUB to be set (it publishes to NATS)");
+                }
+                Target::Nats(pane.clone())
+            } else {
+                resolve_target(&pane)?
+            };
 
             if raw {
                 if wait.is_some() {
@@ -1135,21 +1287,26 @@ _Fill in the session's primary objective._
                 }
 
                 if let Some(timeout_secs) = wait {
-                    wait_for_reply(&msg_id, timeout_secs)?;
+                    wait_for_reply_any(&msg_id, timeout_secs)?;
                 }
             }
         }
 
         Cmd::Ask { pane, message, timeout } => {
-            let pane = resolve_target_cmux(&pane)?;
+            let target = resolve_target(&pane)?;
             let from = sender_id(None);
             let envelope = Envelope::new(
                 &from,
                 MessageKind::Chat { text: message },
             ).with_to(&pane);
             let msg_id = envelope.id.clone();
-            cmux::send(&pane, &envelope.encode()?)?;
-            wait_for_reply(&msg_id, timeout)?;
+            match &target {
+                Target::Cmux(id) => cmux::send(id, &envelope.encode()?)?,
+                Target::Nats(name) => rz_cli::nats_hub::publish(name, &envelope)?,
+                Target::File(name) => rz_cli::mailbox::deliver(name, &envelope)?,
+                Target::Http(url) => rz_cli::transport::deliver_http(url, &envelope)?,
+            }
+            wait_for_reply_any(&msg_id, timeout)?;
         }
 
         Cmd::Gather { panes, last } => {
@@ -1236,29 +1393,71 @@ _Fill in the session's primary objective._
 
         Cmd::Broadcast { message, raw } => {
             let from = sender_id(None);
-            let peers = cmux::list_surface_ids()?;
-            let own = cmux::own_surface_id().ok();
+            let own_surface = cmux::own_surface_id().ok();
+            let own_name = std::env::var("RZ_AGENT_NAME").ok();
+            let names = load_names();
             let mut sent = 0;
 
-            for peer in &peers {
-                if own.as_deref() == Some(peer.as_str()) {
-                    continue;
+            // Registered session agents receive via NATS routing — this
+            // covers headless agents and works outside a multiplexer too.
+            let mut nats_targets = std::collections::BTreeSet::new();
+            if !raw {
+                if let Ok(agents) = rz_cli::registry::list_all() {
+                    nats_targets.extend(agents.into_iter().map(|a| a.name));
                 }
-                if raw {
-                    cmux::send(peer, &message)?;
-                } else {
-                    let envelope = Envelope::new(
-                        &from,
-                        MessageKind::Chat { text: message.clone() },
-                    );
-                    cmux::send(peer, &envelope.encode()?)?;
+                if let Ok(agents) = rz_cli::registry::nats_list() {
+                    nats_targets.extend(agents.into_iter().map(|a| a.name));
                 }
-                sent += 1;
+                if let Some(n) = &own_name {
+                    nats_targets.remove(n);
+                }
+                nats_targets.remove(&from);
             }
-            eprintln!("broadcast to {sent} surfaces");
+
+            // Surfaces owned by a NATS target get the message through their
+            // listener — don't paste a duplicate into their terminal.
+            let covered: std::collections::HashSet<&String> =
+                nats_targets.iter().filter_map(|n| names.get(n)).collect();
+
+            if let Ok(peers) = cmux::list_surface_ids() {
+                for peer in &peers {
+                    if own_surface.as_deref() == Some(peer.as_str()) {
+                        continue;
+                    }
+                    if covered.contains(peer) {
+                        continue;
+                    }
+                    if raw {
+                        cmux::send(peer, &message)?;
+                    } else {
+                        let envelope = Envelope::new(
+                            &from,
+                            MessageKind::Chat { text: message.clone() },
+                        );
+                        cmux::send(peer, &envelope.encode()?)?;
+                    }
+                    sent += 1;
+                }
+            }
+
+            for name in &nats_targets {
+                let envelope = Envelope::new(
+                    &from,
+                    MessageKind::Chat { text: message.clone() },
+                )
+                .with_to(name);
+                match rz_cli::nats_hub::publish(name, &envelope) {
+                    Ok(_) => sent += 1,
+                    Err(e) => eprintln!("rz: broadcast to '{name}' failed: {e}"),
+                }
+            }
+            eprintln!("broadcast to {sent} agents");
         }
 
         Cmd::Ps => {
+            // Drop entries that stopped heartbeating so dead agents don't linger.
+            let _ = rz_cli::registry::cleanup_stale(600);
+
             println!("{:<18} {:<38} {:<20} {:<8}",
                 "NAME", "ID", "TITLE", "TYPE");
 
@@ -1342,6 +1541,17 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Ping { pane, timeout } => {
+            // NATS agents get an infrastructure-level ping: their listener
+            // answers over request/reply without involving the agent at all.
+            if let Ok(Target::Nats(name)) = resolve_target(&pane) {
+                let rtt = rz_cli::nats_hub::ping(
+                    &name,
+                    std::time::Duration::from_secs(timeout),
+                )?;
+                println!("pong from {name} in {:.1}ms", rtt.as_secs_f64() * 1000.0);
+                return Ok(());
+            }
+
             let pane = resolve_target_cmux(&pane)?;
             let own = cmux::own_surface_id()?;
             let from = sender_id(None);
@@ -1450,6 +1660,7 @@ _Fill in the session's primary objective._
                 permanent: false,
                 registered_at: now,
                 last_seen: now,
+                host: rz_cli::registry::local_host(),
             };
             rz_cli::registry::register(entry.clone())?;
             let _ = rz_cli::registry::nats_register(&entry);
@@ -1464,7 +1675,55 @@ _Fill in the session's primary objective._
 
         
         Cmd::Listen { name, deliver } => {
-            rz_cli::nats_hub::subscribe_and_deliver(&name, &deliver)?;
+            // Register the agent so `rz ps` and `rz send` can discover it.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let entry = rz_cli::registry::AgentEntry {
+                name: name.clone(),
+                id: format!("listen-{}", std::process::id()),
+                transport: "nats".to_string(),
+                endpoint: name.clone(),
+                capabilities: vec![],
+                permanent: false,
+                registered_at: now_ms,
+                last_seen: now_ms,
+                host: rz_cli::registry::local_host(),
+            };
+            rz_cli::registry::register(entry.clone())?;
+            let _ = rz_cli::registry::nats_register(&entry);
+
+            // Heartbeat so registries don't consider a long-lived listener stale.
+            // Re-register the full entry (not just last_seen): a competing
+            // listener may have overwritten it with its own pid, and after it
+            // dies the entry must heal back to point at us.
+            let hb_name = name.clone();
+            let hb_entry = entry.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(120));
+                let mut e = hb_entry.clone();
+                e.last_seen = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let _ = rz_cli::registry::register(e);
+                let _ = rz_cli::registry::nats_heartbeat(&hb_name, &hb_entry);
+            });
+
+            // When delivering to cmux, update names.json so `rz ps` shows
+            // the NATS name instead of whatever the surface was previously called.
+            if let Some(surface_id) = deliver.strip_prefix("cmux:") {
+                save_name(&name, surface_id);
+            }
+
+            // Block on NATS subscription; deregister on exit.
+            let result = rz_cli::nats_hub::subscribe_and_deliver(&name, &deliver);
+
+            let _ = rz_cli::registry::deregister(&name);
+            let _ = rz_cli::registry::nats_deregister(&name);
+
+            result?;
         }
 
         Cmd::Recv { name, one, count } => {
@@ -1597,12 +1856,11 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Kv(kv_cmd) => {
-            let rt = tokio::runtime::Runtime::new().wrap_err("tokio runtime")?;
-            rt.block_on(async {
-                let hub_url = rz_cli::nats_hub::hub_url()
-                    .ok_or_else(|| eyre::eyre!("RZ_HUB must be set for KV operations"))?;
-                let client = async_nats::connect(&hub_url).await
-                    .wrap_err("NATS connect")?;
+            if rz_cli::nats_hub::hub_url().is_none() {
+                bail!("RZ_HUB must be set for KV operations");
+            }
+            let client = rz_cli::nats_hub::client()?;
+            rz_cli::nats_hub::runtime().block_on(async {
                 let js = async_nats::jetstream::new(client.clone());
 
                 match kv_cmd {

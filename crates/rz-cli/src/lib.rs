@@ -15,6 +15,7 @@ pub mod mailbox;
 pub mod nats_hub;
 pub mod telegram;
 pub mod registry;
+pub mod session;
 pub mod status;
 pub mod transport;
 pub mod tmux;
