@@ -87,8 +87,13 @@ This lets you receive messages from other agents via NATS. Without it, you won't
 Peers:
 {peer_list}
 ## rz commands (always use this exact binary path — plain `rz` on PATH may be a different version)
-{rz} send <name> "msg"   — message an agent
+{rz} send <name> "msg"   — message an agent (short, plain text)
 {rz} send lead "DONE: <summary>"  — report completion
+For anything with markdown, `backticks`, $ or several lines, pipe it through a quoted heredoc —
+inside "double quotes" the shell runs backticks and expands $vars, and parts of your message vanish:
+{rz} send lead - <<'EOF'
+DONE: <multi-line report>
+EOF
 {rz} run --name <n> claude --dangerously-skip-permissions  — spawn agent
 {rz} ps                  — list agents
 {rz} logs <name>         — read agent output

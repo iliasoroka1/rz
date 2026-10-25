@@ -163,6 +163,7 @@ Temporary agents are pruned after 10 minutes of inactivity. Permanent agents (`-
 | Command | Description |
 |---|---|
 | `rz send <target> "msg"` | Send message (auto-routes) |
+| `rz send <target> - <<'EOF'` | Send the message from stdin, verbatim (use for markdown: no shell expansion of `` ` `` or `$`) |
 | `rz broadcast "msg"` | Send to all agents |
 | `rz ping <target>` | Check liveness |
 

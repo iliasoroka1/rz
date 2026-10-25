@@ -89,16 +89,21 @@ enum Cmd {
         args: Vec<String>,
     },
 
+    #[command(verbatim_doc_comment)]
     /// Send a message to an agent.
     ///
     /// Examples:
     ///   rz send worker "do this task"
     ///   rz send lead "DONE: finished the task"
+    ///   rz send lead - <<'EOF'
+    ///   DONE: markdown with `backticks` and $vars, sent verbatim
+    ///   EOF
     Send {
         /// Target agent name or ID.
         pane: String,
-        /// Message text.
-        message: String,
+        /// Message text. Omit it or pass "-" to read it from stdin: the safe way to
+        /// send markdown, since the shell won't touch backticks or $ in a quoted heredoc.
+        message: Option<String>,
         /// Send plain text instead of @@RZ: envelope.
         #[arg(long)]
         raw: bool,
@@ -206,8 +211,8 @@ enum Cmd {
     Ask {
         /// Target agent name or ID.
         pane: String,
-        /// Message text.
-        message: String,
+        /// Message text, or "-"/omitted to read it from stdin.
+        message: Option<String>,
         /// Seconds to wait for a reply (default 60).
         #[arg(long, default_value = "60")]
         timeout: u64,
@@ -304,8 +309,8 @@ enum Cmd {
 
     /// Broadcast a message to all other agents.
     Broadcast {
-        /// Message text.
-        message: String,
+        /// Message text, or "-"/omitted to read it from stdin.
+        message: Option<String>,
         /// Send plain text instead of @@RZ: envelopes.
         #[arg(long)]
         raw: bool,
@@ -1020,6 +1025,36 @@ fn publish_structured(target_name: &str, from: &str, kind_name: &str, body: serd
     Ok(())
 }
 
+/// The message from the argument, or from stdin when it is omitted or "-".
+///
+/// Agents write markdown, and inside a double-quoted shell argument bash runs
+/// `backticks` and expands $vars, silently dropping parts of the message
+/// before rz ever sees it. A quoted heredoc (`rz send lead - <<'EOF'`) passes
+/// the text through untouched.
+fn message_text(arg: Option<String>) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+
+    if let Some(m) = arg.filter(|m| m != "-") {
+        return Ok(m);
+    }
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        bail!("no message given: pass it as an argument, or on stdin: rz send <name> - <<'EOF' ... EOF");
+    }
+    let mut buf = String::new();
+    stdin.read_to_string(&mut buf).wrap_err("reading message from stdin")?;
+    stdin_message(&buf)
+}
+
+/// Heredocs and `echo` add a trailing newline; keep everything else verbatim.
+fn stdin_message(buf: &str) -> Result<String> {
+    let text = buf.trim_end_matches(['\n', '\r']);
+    if text.trim().is_empty() {
+        bail!("empty message on stdin");
+    }
+    Ok(text.to_string())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1256,6 +1291,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Send { pane, message, raw, from, r#ref, wait, force } => {
+            let message = message_text(message)?;
             let target = if force {
                 if rz_cli::nats_hub::hub_url().is_none() {
                     bail!("--force requires RZ_HUB to be set (it publishes to NATS)");
@@ -1310,6 +1346,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Ask { pane, message, timeout } => {
+            let message = message_text(message)?;
             let target = resolve_target(&pane)?;
             let from = sender_id(None);
             let envelope = Envelope::new(
@@ -1409,6 +1446,7 @@ _Fill in the session's primary objective._
         }
 
         Cmd::Broadcast { message, raw } => {
+            let message = message_text(message)?;
             let from = sender_id(None);
             let own_surface = cmux::own_surface_id().ok();
             let own_name = std::env::var("RZ_AGENT_NAME").ok();
@@ -2040,3 +2078,27 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_message_keeps_markdown_verbatim() {
+        let body = "DONE: split `computational modeling`\n- costs $5\n\n  indented\n";
+        assert_eq!(
+            stdin_message(body).unwrap(),
+            "DONE: split `computational modeling`\n- costs $5\n\n  indented"
+        );
+    }
+
+    #[test]
+    fn stdin_message_rejects_blank() {
+        assert!(stdin_message("  \n\n").is_err());
+    }
+
+    #[test]
+    fn message_argument_wins_over_stdin() {
+        assert_eq!(message_text(Some("hi".into())).unwrap(), "hi");
+    }
+}
