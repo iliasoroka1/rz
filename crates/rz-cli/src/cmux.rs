@@ -129,6 +129,7 @@ fn v2_call(method: &str, params: Value) -> Result<Value> {
 /// Claude Code need time to process pasted text before the Enter key
 /// can trigger submission.
 pub fn send(surface_id: &str, text: &str) -> Result<()> {
+    let text = &crate::spill::for_terminal(text)?;
     v2_call("surface.send_text", json!({
         "surface_id": surface_id,
         "text": text,

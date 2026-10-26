@@ -94,6 +94,7 @@ inside "double quotes" the shell runs backticks and expands $vars, and parts of 
 {rz} send lead - <<'EOF'
 DONE: <multi-line report>
 EOF
+Long messages arrive as a short preview ending in "[rz: long message ... Read the full text: <path>]" — read that file before acting on the message.
 {rz} run --name <n> claude --dangerously-skip-permissions  — spawn agent
 {rz} ps                  — list agents
 {rz} logs <name>         — read agent output

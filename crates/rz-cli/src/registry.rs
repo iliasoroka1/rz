@@ -74,11 +74,14 @@ pub fn registry_path() -> PathBuf {
 
 /// Load the registry from disk. Returns an empty map if the file does not exist.
 pub fn load() -> Result<HashMap<String, AgentEntry>> {
-    let path = registry_path();
+    load_from(&registry_path())
+}
+
+fn load_from(path: &std::path::Path) -> Result<HashMap<String, AgentEntry>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let data = fs::read_to_string(&path)
+    let data = fs::read_to_string(path)
         .wrap_err_with(|| format!("failed to read {}", path.display()))?;
     let map: HashMap<String, AgentEntry> =
         serde_json::from_str(&data).wrap_err("failed to parse registry.json")?;
@@ -87,7 +90,10 @@ pub fn load() -> Result<HashMap<String, AgentEntry>> {
 
 /// Atomically write the registry to disk (write-tmp then rename).
 pub fn save(registry: &HashMap<String, AgentEntry>) -> Result<()> {
-    let path = registry_path();
+    save_to(&registry_path(), registry)
+}
+
+fn save_to(path: &std::path::Path, registry: &HashMap<String, AgentEntry>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
@@ -95,28 +101,77 @@ pub fn save(registry: &HashMap<String, AgentEntry>) -> Result<()> {
     let json = serde_json::to_string_pretty(registry)
         .wrap_err("failed to serialize registry")?;
 
-    // Atomic write: temp file in same dir, then rename.
-    let tmp = path.with_extension("json.tmp");
+    // Atomic write: temp file in same dir, then rename. The temp name is per
+    // process so concurrent writers never rename each other's file away.
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     fs::write(&tmp, json.as_bytes())
         .wrap_err_with(|| format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, &path)
+    fs::rename(&tmp, path)
         .wrap_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Exclusive lock on `~/.rz/registry.lock`, released when dropped. Every
+/// load-modify-save holds it: listeners started together used to race, and
+/// all but one exited on a failed rename (or silently dropped an entry).
+struct RegistryLock {
+    _file: fs::File,
+}
+
+impl RegistryLock {
+    fn acquire(registry: &std::path::Path) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        let path = registry.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .wrap_err_with(|| format!("failed to open {}", path.display()))?;
+        // SAFETY: flock on a valid, owned descriptor; blocks until acquired.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .wrap_err_with(|| format!("failed to lock {}", path.display()));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+/// Load, modify and save the registry under the lock. `f` returns whether it
+/// changed anything (nothing is written otherwise) plus a result to pass back.
+fn update<T>(f: impl FnOnce(&mut HashMap<String, AgentEntry>) -> (bool, T)) -> Result<T> {
+    update_at(&registry_path(), f)
+}
+
+fn update_at<T>(
+    path: &std::path::Path,
+    f: impl FnOnce(&mut HashMap<String, AgentEntry>) -> (bool, T),
+) -> Result<T> {
+    let _lock = RegistryLock::acquire(path)?;
+    let mut reg = load_from(path)?;
+    let (changed, out) = f(&mut reg);
+    if changed {
+        save_to(path, &reg)?;
+    }
+    Ok(out)
 }
 
 /// Register (or update) an agent entry. Keys are session-scoped so
 /// identically-named agents in different sessions coexist in one file.
 pub fn register(entry: AgentEntry) -> Result<()> {
-    let mut reg = load()?;
-    reg.insert(crate::session::scoped_key(&entry.name), entry);
-    save(&reg)
+    update(|reg| {
+        reg.insert(crate::session::scoped_key(&entry.name), entry);
+        (true, ())
+    })
 }
 
 /// Remove an agent by name (current session only).
 pub fn deregister(name: &str) -> Result<()> {
-    let mut reg = load()?;
-    reg.remove(&crate::session::scoped_key(name));
-    save(&reg)
+    update(|reg| (reg.remove(&crate::session::scoped_key(name)).is_some(), ()))
 }
 
 /// Look up an agent by name (current session only).
@@ -138,39 +193,66 @@ pub fn list_all() -> Result<Vec<AgentEntry>> {
 /// Remove entries whose `last_seen` is older than `max_age_secs` seconds ago.
 /// Returns the number of entries removed.
 pub fn cleanup_stale(max_age_secs: u64) -> Result<usize> {
-    let mut reg = load()?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     let cutoff = now_ms.saturating_sub(max_age_secs * 1000);
-
-    let before = reg.len();
-    reg.retain(|_, entry| entry.last_seen >= cutoff);
-    let removed = before - reg.len();
-
-    if removed > 0 {
-        save(&reg)?;
-    }
-    Ok(removed)
+    update(|reg| {
+        let before = reg.len();
+        reg.retain(|_, entry| entry.last_seen >= cutoff);
+        let removed = before - reg.len();
+        (removed > 0, removed)
+    })
 }
 
 /// Update `last_seen` to now for the given agent name (current session).
 pub fn touch(name: &str) -> Result<()> {
-    let mut reg = load()?;
-    if let Some(entry) = reg.get_mut(&crate::session::scoped_key(name)) {
-        entry.last_seen = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        save(&reg)?;
-    }
-    Ok(())
+    update(|reg| match reg.get_mut(&crate::session::scoped_key(name)) {
+        Some(entry) => {
+            entry.last_seen = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            (true, ())
+        }
+        None => (false, ()),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_updates_keep_every_entry() {
+        let dir = std::env::temp_dir().join(format!("rz-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("registry.json");
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    update_at(&path, |reg| {
+                        let mut e = entry(false, i);
+                        e.name = format!("agent{i}");
+                        reg.insert(e.name.clone(), e);
+                        (true, ())
+                    })
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        assert_eq!(load_from(&path).unwrap().len(), 16);
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
 
     fn entry(permanent: bool, last_seen: u64) -> AgentEntry {
         AgentEntry {

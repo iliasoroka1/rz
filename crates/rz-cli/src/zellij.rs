@@ -51,6 +51,7 @@ impl PaneInfo {
 /// Uses `paste` (bracketed paste mode) for the content, a short delay for
 /// the terminal to process the paste, then `write 13` (CR byte) to submit.
 pub fn send(pane_id: &str, text: &str) -> Result<()> {
+    let text = &crate::spill::for_terminal(text)?;
     zellij(&["action", "paste", "--pane-id", pane_id, text])?;
     std::thread::sleep(std::time::Duration::from_millis(200));
     zellij(&["action", "write", "--pane-id", pane_id, "13"])?;

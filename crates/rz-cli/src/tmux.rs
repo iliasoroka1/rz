@@ -57,6 +57,7 @@ pub fn session_name() -> Result<String> {
 /// For short text (<=200 chars), uses `send-keys`. For longer text, pipes
 /// through `load-buffer -` then `paste-buffer` to avoid argument length issues.
 pub fn send(pane_id: &str, text: &str) -> Result<()> {
+    let text = &crate::spill::for_terminal(text)?;
     if text.len() <= 200 {
         tmux(&["send-keys", "-t", pane_id, text, "Enter"])?;
     } else {
