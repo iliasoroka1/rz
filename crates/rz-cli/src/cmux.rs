@@ -290,6 +290,18 @@ pub fn list_surface_ids() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Whether a terminal surface still exists: `Some(false)` only when cmux
+/// answers that it is gone, `None` when cmux can't be asked (socket trouble).
+pub fn surface_exists(surface_id: &str) -> Option<bool> {
+    match read_text(surface_id) {
+        Ok(_) => Some(true),
+        Err(e) => {
+            let msg = e.to_string();
+            (msg.contains("not found") || msg.contains("not a terminal")).then_some(false)
+        }
+    }
+}
+
 /// Read text content from a surface's terminal.
 pub fn read_text(surface_id: &str) -> Result<String> {
     let result = v2_call(

@@ -1776,10 +1776,22 @@ _Fill in the session's primary objective._
             // Re-register the full entry (not just last_seen): a competing
             // listener may have overwritten it with its own pid, and after it
             // dies the entry must heal back to point at us.
+            // A listener whose pane was closed would otherwise look alive
+            // forever (and keep the name routed to a dead pane), so it exits
+            // once cmux says the surface is gone.
             let hb_name = name.clone();
             let hb_entry = entry.clone();
+            let hb_surface = deliver.strip_prefix("cmux:").map(str::to_owned);
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(120));
+                if let Some(surface) = &hb_surface {
+                    if cmux::surface_exists(surface) == Some(false) {
+                        eprintln!("rz: pane {surface} for '{hb_name}' is gone, stopping listener");
+                        let _ = rz_cli::registry::deregister(&hb_name);
+                        let _ = rz_cli::registry::nats_deregister(&hb_name);
+                        std::process::exit(0);
+                    }
+                }
                 let mut e = hb_entry.clone();
                 e.last_seen = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
