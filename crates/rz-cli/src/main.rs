@@ -778,10 +778,49 @@ fn resolve_target(target: &str) -> Result<Target> {
     if rz_cli::nats_hub::hub_url().is_some() {
         return Err(eyre::eyre!(
             "unknown agent '{target}' — no live listener found (checked registry, NATS KV, names, surfaces).\n\
-             If the agent is temporarily offline, use `rz send {target} <msg> --force` to store the message on NATS until it reconnects."
+             Live agents: {}.\n\
+             If the agent is temporarily offline, use `rz send {target} <msg> --force` to store the message on NATS until it reconnects.",
+            live_agent_names().join(", ")
         ));
     }
     Err(eyre::eyre!("unknown agent '{}' — use a UUID, a name from `rz run --name`, or `rz register`", target))
+}
+
+/// Names of agents that look alive, for "who can I send to" hints in errors.
+fn live_agent_names() -> Vec<String> {
+    let mut names: Vec<String> = rz_cli::registry::list_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !entry_is_dead(a))
+        .map(|a| a.name)
+        .collect();
+    names.extend(load_names().into_keys());
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Deliver `envelope` to `target`. Returns a short receipt ("via cmux:<id>").
+/// A transport failure names the target and lists live agents, so a stale
+/// registry entry ("Workspace not found") is not a dead end.
+fn deliver(name: &str, target: &Target, envelope: &Envelope) -> Result<String> {
+    let (via, result) = match target {
+        Target::Cmux(id) => (format!("cmux:{id}"), envelope.encode().and_then(|e| cmux::send(id, &e))),
+        Target::Nats(n) => (format!("nats:{n}"), rz_cli::nats_hub::publish(n, envelope)),
+        Target::File(n) => (format!("file:{n}"), rz_cli::mailbox::deliver(n, envelope)),
+        Target::Http(url) => (format!("http:{url}"), rz_cli::transport::deliver_http(url, envelope)),
+    };
+    match result {
+        Ok(()) => Ok(via),
+        Err(e) => {
+            let live = live_agent_names();
+            let live = if live.is_empty() { "none".to_string() } else { live.join(", ") };
+            Err(eyre::eyre!(
+                "could not deliver to '{name}' via {via}: {e}\n\
+                 The registry entry may be stale (its terminal or workspace is gone). Live agents: {live}"
+            ))
+        }
+    }
 }
 
 fn registry_target(entry: &rz_cli::registry::AgentEntry) -> Result<Target> {
@@ -1324,20 +1363,9 @@ _Fill in the session's primary objective._
                 }
                 let msg_id = envelope.id.clone();
 
-                match &target {
-                    Target::Cmux(id) => {
-                        cmux::send(id, &envelope.encode()?)?;
-                    }
-                    Target::Nats(name) => {
-                        rz_cli::nats_hub::publish(name, &envelope)?;
-                    }
-                    Target::File(name) => {
-                        rz_cli::mailbox::deliver(name, &envelope)?;
-                    }
-                    Target::Http(url) => {
-                        rz_cli::transport::deliver_http(url, &envelope)?;
-                    }
-                }
+                let via = deliver(&pane, &target, &envelope)?;
+                // Receipt on stderr so scripts reading stdout are unaffected.
+                eprintln!("sent {msg_id} to {pane} via {via}");
 
                 if let Some(timeout_secs) = wait {
                     wait_for_reply_any(&msg_id, timeout_secs)?;
@@ -1354,12 +1382,7 @@ _Fill in the session's primary objective._
                 MessageKind::Chat { text: message },
             ).with_to(&pane);
             let msg_id = envelope.id.clone();
-            match &target {
-                Target::Cmux(id) => cmux::send(id, &envelope.encode()?)?,
-                Target::Nats(name) => rz_cli::nats_hub::publish(name, &envelope)?,
-                Target::File(name) => rz_cli::mailbox::deliver(name, &envelope)?,
-                Target::Http(url) => rz_cli::transport::deliver_http(url, &envelope)?,
-            }
+            deliver(&pane, &target, &envelope)?;
             wait_for_reply_any(&msg_id, timeout)?;
         }
 
